@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"golang.org/x/text/language"
 )
@@ -202,19 +201,6 @@ func (sc *SemaContext) isUnresolvedPlaceholder(expr Expr) bool {
 		return false
 	}
 	return sc.Placeholders.IsUnresolvedPlaceholder(expr)
-}
-
-// GetLocation returns the session timezone.
-func (sc *SemaContext) GetLocation() *time.Location {
-	if sc == nil || sc.Location == nil || *sc.Location == nil {
-		return time.UTC
-	}
-	return *sc.Location
-}
-
-// GetRelativeParseTime implements ParseTimeContext.
-func (sc *SemaContext) GetRelativeParseTime() time.Time {
-	return timeutil.Now().In(sc.GetLocation())
 }
 
 // GetTypeResolver returns the TypeReferenceResolver.
