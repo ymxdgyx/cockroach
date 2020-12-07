@@ -40,6 +40,12 @@ func (t TableID) ColumnID(ord int) ColumnID {
 	return t.firstColID() + ColumnID(ord)
 }
 
+// IndexColumnID returns the metadata id of the idxOrd-th index column in the
+// given index.
+func (t TableID) IndexColumnID(idx cat.Index, idxOrd int) ColumnID {
+	return t.ColumnID(idx.Column(idxOrd).Ordinal())
+}
+
 // ColumnOrdinal returns the ordinal position of the given column in its base
 // table.
 //
@@ -168,15 +174,33 @@ func (tm *TableMeta) clearAnnotations() {
 	}
 }
 
-// IndexColumns returns the metadata IDs for the set of columns in the given
-// index.
+// IndexColumns returns the metadata IDs for the set of table columns in the
+// given index.
 // TODO(justin): cache this value in the table metadata.
 func (tm *TableMeta) IndexColumns(indexOrd int) ColSet {
 	index := tm.Table.Index(indexOrd)
 
 	var indexCols ColSet
 	for i, n := 0, index.ColumnCount(); i < n; i++ {
-		ord := index.Column(i).Ordinal
+		ord := index.Column(i).Ordinal()
+		indexCols.Add(tm.MetaID.ColumnID(ord))
+	}
+	return indexCols
+}
+
+// IndexColumnsMapVirtual returns the metadata IDs for the set of table columns
+// in the given index. Virtual inverted index columns are mapped to their source
+// column.
+func (tm *TableMeta) IndexColumnsMapVirtual(indexOrd int) ColSet {
+	index := tm.Table.Index(indexOrd)
+
+	var indexCols ColSet
+	for i, n := 0, index.ColumnCount(); i < n; i++ {
+		col := index.Column(i)
+		ord := col.Ordinal()
+		if col.Kind() == cat.VirtualInverted {
+			ord = col.InvertedSourceColumnOrdinal()
+		}
 		indexCols.Add(tm.MetaID.ColumnID(ord))
 	}
 	return indexCols
@@ -189,7 +213,7 @@ func (tm *TableMeta) IndexKeyColumns(indexOrd int) ColSet {
 
 	var indexCols ColSet
 	for i, n := 0, index.KeyColumnCount(); i < n; i++ {
-		ord := index.Column(i).Ordinal
+		ord := index.Column(i).Ordinal()
 		indexCols.Add(tm.MetaID.ColumnID(ord))
 	}
 	return indexCols
@@ -203,11 +227,10 @@ func (tm *TableMeta) IndexKeyColumnsMapVirtual(indexOrd int) ColSet {
 
 	var indexCols ColSet
 	for i, n := 0, index.KeyColumnCount(); i < n; i++ {
-		ord := 0
-		if i == 0 && index.IsInverted() {
-			ord = index.Column(i).InvertedSourceColumnOrdinal()
-		} else {
-			ord = index.Column(i).Ordinal
+		col := index.Column(i)
+		ord := col.Ordinal()
+		if col.Kind() == cat.VirtualInverted {
+			ord = col.InvertedSourceColumnOrdinal()
 		}
 		indexCols.Add(tm.MetaID.ColumnID(ord))
 	}

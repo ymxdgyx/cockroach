@@ -20,15 +20,15 @@ import { CachedDataReducerState, jobsKey, refreshJobs } from "src/redux/apiReduc
 import { AdminUIState } from "src/redux/state";
 import { getMatchParamByName } from "src/util/query";
 import { showSetting, statusSetting, typeSetting } from ".";
-import Loading from "../shared/components/loading";
+import { Loading } from "@cockroachlabs/admin-ui-components";
 import SqlBox from "../shared/components/sql/box";
 import { SummaryCard } from "../shared/components/summaryCard";
 
 import Job = cockroach.server.serverpb.JobsResponse.IJob;
 import JobsRequest = cockroach.server.serverpb.JobsRequest;
 import JobsResponse = cockroach.server.serverpb.JobsResponse;
-import { Button } from "src/components/button";
-import { BackIcon } from "src/components/icon";
+import { Button } from "@cockroachlabs/admin-ui-components";
+import { ArrowLeft } from "@cockroachlabs/icons";
 import { DATE_FORMAT } from "src/util/format";
 import { JobStatusCell } from "./jobStatusCell";
 import "src/views/shared/components/summaryCard/styles.styl";
@@ -100,7 +100,7 @@ class JobDetails extends React.Component<JobsTableProps, {}> {
             onClick={this.prevPage}
             type="unstyled-link"
             size="small"
-            icon={BackIcon}
+            icon={<ArrowLeft fontSize={"10px"} />}
             iconPosition="left"
           >
             Jobs

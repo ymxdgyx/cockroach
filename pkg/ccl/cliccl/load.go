@@ -20,7 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cli"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -62,7 +62,7 @@ func runLoadShow(cmd *cobra.Command, args []string) error {
 	}
 
 	externalStorageFromURI := func(ctx context.Context, uri string,
-		user string) (cloud.ExternalStorage, error) {
+		user security.SQLUsername) (cloud.ExternalStorage, error) {
 		return cloudimpl.ExternalStorageFromURI(ctx, uri, base.ExternalIODirConfig{},
 			cluster.NoSettings, blobs.TestEmptyBlobClientFactory, user, nil, nil)
 	}
@@ -70,7 +70,7 @@ func runLoadShow(cmd *cobra.Command, args []string) error {
 	// upgraded from the old FK representation, or even older formats). If more
 	// fields are added to the output, the table descriptors may need to be
 	// upgraded.
-	desc, err := backupccl.ReadBackupManifestFromURI(ctx, basepath, security.RootUser,
+	desc, err := backupccl.ReadBackupManifestFromURI(ctx, basepath, security.RootUserName(),
 		externalStorageFromURI, nil)
 	if err != nil {
 		return err
@@ -104,13 +104,13 @@ func runLoadShow(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Descriptors:\n")
 	for i := range desc.Descriptors {
 		d := &desc.Descriptors[i]
-		if desc := sqlbase.TableFromDescriptor(d, hlc.Timestamp{}); desc != nil {
+		if desc := descpb.TableFromDescriptor(d, hlc.Timestamp{}); desc != nil {
 			fmt.Printf("	%d: %s (table)\n",
-				sqlbase.GetDescriptorID(d), sqlbase.GetDescriptorName(d))
+				descpb.GetDescriptorID(d), descpb.GetDescriptorName(d))
 		}
 		if desc := d.GetDatabase(); desc != nil {
 			fmt.Printf("	%d: %s (database)\n",
-				sqlbase.GetDescriptorID(d), sqlbase.GetDescriptorName(d))
+				descpb.GetDescriptorID(d), descpb.GetDescriptorName(d))
 		}
 	}
 	return nil

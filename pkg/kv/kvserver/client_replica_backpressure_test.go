@@ -142,7 +142,7 @@ func TestBackpressureNotAppliedWhenReducingRangeSize(t *testing.T) {
 	}
 
 	moveTableToNewStore := func(t *testing.T, tc *testcluster.TestCluster, args base.TestClusterArgs, tablePrefix roachpb.Key) {
-		tc.AddServer(t, args.ServerArgs)
+		tc.AddAndStartServer(t, args.ServerArgs)
 		testutils.SucceedsSoon(t, func() error {
 			desc, err := tc.LookupRange(tablePrefix)
 			require.NoError(t, err)
@@ -151,7 +151,7 @@ func TestBackpressureNotAppliedWhenReducingRangeSize(t *testing.T) {
 				return nil
 			}
 			if len(voters) == 1 {
-				desc, err = tc.AddReplicas(tablePrefix, tc.Target(1))
+				desc, err = tc.AddVoters(tablePrefix, tc.Target(1))
 				if err != nil {
 					return err
 				}
@@ -159,7 +159,7 @@ func TestBackpressureNotAppliedWhenReducingRangeSize(t *testing.T) {
 			if err = tc.TransferRangeLease(desc, tc.Target(1)); err != nil {
 				return err
 			}
-			_, err = tc.RemoveReplicas(tablePrefix, tc.Target(0))
+			_, err = tc.RemoveVoters(tablePrefix, tc.Target(0))
 			return err
 		})
 	}

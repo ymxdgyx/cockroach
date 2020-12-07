@@ -10,14 +10,7 @@
 
 package catconstants
 
-import (
-	"math"
-
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-)
-
-// DefaultSearchPath is the search path used by virgin sessions.
-var DefaultSearchPath = sessiondata.MakeSearchPath([]string{"public"})
+import "math"
 
 // ReportableAppNamePrefix indicates that the application name can be
 // reported in telemetry without scrubbing. (Note this only applies to
@@ -78,14 +71,20 @@ const (
 	CrdbInternalTableIndexesTableID
 	CrdbInternalTablesTableID
 	CrdbInternalTablesTableLastStatsID
+	CrdbInternalTransactionStatsTableID
 	CrdbInternalTxnStatsTableID
 	CrdbInternalZonesTableID
+	CrdbInternalInvalidDescriptorsTableID
 	InformationSchemaID
 	InformationSchemaAdministrableRoleAuthorizationsID
 	InformationSchemaApplicableRolesID
+	InformationSchemaCharacterSets
 	InformationSchemaCheckConstraints
+	InformationSchemaCollationCharacterSetApplicability
+	InformationSchemaCollations
 	InformationSchemaColumnPrivilegesID
 	InformationSchemaColumnsTableID
+	InformationSchemaColumnUDTUsageID
 	InformationSchemaConstraintColumnUsageTableID
 	InformationSchemaEnabledRolesID
 	InformationSchemaKeyColumnUsageTableID
@@ -100,6 +99,7 @@ const (
 	InformationSchemaTableConstraintTableID
 	InformationSchemaTablePrivilegesID
 	InformationSchemaTablesTableID
+	InformationSchemaTypePrivilegesID
 	InformationSchemaViewsTableID
 	InformationSchemaUserPrivilegesID
 	PgCatalogID
@@ -133,6 +133,7 @@ const (
 	PgCatalogLocksTableID
 	PgCatalogMatViewsTableID
 	PgCatalogNamespaceTableID
+	PgCatalogOpclassTableID
 	PgCatalogOperatorTableID
 	PgCatalogPreparedStatementsTableID
 	PgCatalogPreparedXactsTableID

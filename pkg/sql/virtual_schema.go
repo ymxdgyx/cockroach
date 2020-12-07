@@ -20,7 +20,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -28,7 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
@@ -68,7 +72,7 @@ type virtualSchemaDef interface {
 type virtualIndex struct {
 	// populate populates the table given the constraint. matched is true if any
 	// rows were generated.
-	populate func(ctx context.Context, constraint tree.Datum, p *planner, db *sqlbase.ImmutableDatabaseDescriptor,
+	populate func(ctx context.Context, constraint tree.Datum, p *planner, db *dbdesc.Immutable,
 		addRow func(...tree.Datum) error,
 	) (matched bool, err error)
 
@@ -93,7 +97,7 @@ type virtualSchemaTable struct {
 	// populate, if non-nil, is a function that is used when creating a
 	// valuesNode. This function eagerly loads every row of the virtual table
 	// during initialization of the valuesNode.
-	populate func(ctx context.Context, p *planner, db *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error
+	populate func(ctx context.Context, p *planner, db *dbdesc.Immutable, addRow func(...tree.Datum) error) error
 
 	// indexes, if non empty, is a slice of populate methods that also take a
 	// constraint, only generating rows that match the constraint. The order of
@@ -104,13 +108,13 @@ type virtualSchemaTable struct {
 	// generator, if non-nil, is a function that is used when creating a
 	// virtualTableNode. This function returns a virtualTableGenerator function
 	// which generates the next row of the virtual table when called.
-	generator func(ctx context.Context, p *planner, db *sqlbase.ImmutableDatabaseDescriptor) (virtualTableGenerator, cleanupFunc, error)
+	generator func(ctx context.Context, p *planner, db *dbdesc.Immutable) (virtualTableGenerator, cleanupFunc, error)
 }
 
 // virtualSchemaView represents a view within a virtualSchema
 type virtualSchemaView struct {
 	schema        string
-	resultColumns sqlbase.ResultColumns
+	resultColumns colinfo.ResultColumns
 }
 
 // getSchema is part of the virtualSchemaDef interface.
@@ -152,7 +156,7 @@ func (t virtualSchemaTable) initVirtualTableDesc(
 
 	// Virtual tables never use SERIAL so we need not process SERIAL
 	// types here.
-	mutDesc, err := MakeTableDesc(
+	mutDesc, err := NewTableDesc(
 		ctx,
 		nil, /* txn */
 		nil, /* vs */
@@ -279,10 +283,12 @@ var startTime = hlc.Timestamp{
 // created directly, but instead will be populated in a post-startup hook
 // on an Executor.
 type VirtualSchemaHolder struct {
-	entries      map[string]virtualSchemaEntry
+	entries      map[string]*virtualSchemaEntry
 	defsByID     map[descpb.ID]*virtualDefEntry
 	orderedNames []string
 }
+
+var _ VirtualTabler = (*VirtualSchemaHolder)(nil)
 
 // GetVirtualSchema makes VirtualSchemaHolder implement schema.VirtualSchemas.
 func (vs *VirtualSchemaHolder) GetVirtualSchema(schemaName string) (catalog.VirtualSchema, bool) {
@@ -295,37 +301,39 @@ var _ catalog.VirtualSchemas = (*VirtualSchemaHolder)(nil)
 type virtualSchemaEntry struct {
 	// TODO(ajwerner): Use a descpb.SchemaDescriptor here as part of the
 	// user-defined schema work.
-	desc            *sqlbase.ImmutableDatabaseDescriptor
-	defs            map[string]virtualDefEntry
+	desc            *dbdesc.Immutable
+	defs            map[string]*virtualDefEntry
 	orderedDefNames []string
 	allTableNames   map[string]struct{}
 	containsTypes   bool
 }
 
-func (v virtualSchemaEntry) Desc() catalog.Descriptor {
+func (v *virtualSchemaEntry) Desc() catalog.Descriptor {
 	return v.desc
 }
 
-func (v virtualSchemaEntry) NumTables() int {
+func (v *virtualSchemaEntry) NumTables() int {
 	return len(v.defs)
 }
 
-func (v virtualSchemaEntry) VisitTables(f func(object catalog.VirtualObject)) {
+func (v *virtualSchemaEntry) VisitTables(f func(object catalog.VirtualObject)) {
 	for _, name := range v.orderedDefNames {
 		f(v.defs[name])
 	}
 }
 
-func (v virtualSchemaEntry) GetObjectByName(
+func (v *virtualSchemaEntry) GetObjectByName(
 	name string, flags tree.ObjectLookupFlags,
 ) (catalog.VirtualObject, error) {
 	switch flags.DesiredObjectKind {
 	case tree.TableObject:
 		if def, ok := v.defs[name]; ok {
 			if flags.RequireMutable {
-				return mutableVirtualDefEntry{desc: def.desc}, nil
+				return &mutableVirtualDefEntry{
+					desc: tabledesc.NewExistingMutable(*def.desc.TableDesc()),
+				}, nil
 			}
-			return &def, nil
+			return def, nil
 		}
 		if _, ok := v.allTableNames[name]; ok {
 			return nil, unimplemented.Newf(v.desc.GetName()+"."+name,
@@ -343,7 +351,7 @@ func (v virtualSchemaEntry) GetObjectByName(
 		// invalid input type like "notatype" will be parsed successfully as
 		// a ResolvableTypeReference, so the error here does not need to be
 		// intercepted and inspected.
-		typRef, err := parser.ParseType(name)
+		typRef, err := parser.GetTypeReferenceFromName(tree.Name(name))
 		if err != nil {
 			return nil, err
 		}
@@ -355,8 +363,8 @@ func (v virtualSchemaEntry) GetObjectByName(
 			return nil, nil
 		}
 
-		return virtualTypeEntry{
-			desc:    sqlbase.MakeSimpleAliasTypeDescriptor(typ),
+		return &virtualTypeEntry{
+			desc:    typedesc.MakeSimpleAlias(typ, catconstants.PgCatalogID),
 			mutable: flags.RequireMutable,
 		}, nil
 	default:
@@ -366,29 +374,29 @@ func (v virtualSchemaEntry) GetObjectByName(
 
 type virtualDefEntry struct {
 	virtualDef                 virtualSchemaDef
-	desc                       *descpb.TableDescriptor
+	desc                       *tabledesc.Immutable
 	comment                    string
 	validWithNoDatabaseContext bool
 }
 
-func (e virtualDefEntry) Desc() catalog.Descriptor {
-	return sqlbase.NewImmutableTableDescriptor(*e.desc)
+func (e *virtualDefEntry) Desc() catalog.Descriptor {
+	return e.desc
 }
 
 type mutableVirtualDefEntry struct {
-	desc *descpb.TableDescriptor
+	desc *tabledesc.Mutable
 }
 
-func (e mutableVirtualDefEntry) Desc() catalog.Descriptor {
-	return sqlbase.NewMutableExistingTableDescriptor(*e.desc)
+func (e *mutableVirtualDefEntry) Desc() catalog.Descriptor {
+	return e.desc
 }
 
 type virtualTypeEntry struct {
-	desc    *sqlbase.ImmutableTypeDescriptor
+	desc    *typedesc.Immutable
 	mutable bool
 }
 
-func (e virtualTypeEntry) Desc() catalog.Descriptor {
+func (e *virtualTypeEntry) Desc() catalog.Descriptor {
 	// TODO(ajwerner): Should this be allowed? I think no. Let's just store an
 	// ImmutableTypeDesc off of this thing.
 	return e.desc
@@ -409,7 +417,7 @@ func newInvalidVirtualDefEntryError() error {
 	return errors.AssertionFailedf("virtualDefEntry.virtualDef must be a virtualSchemaTable")
 }
 
-func (e virtualDefEntry) validateRow(datums tree.Datums, columns sqlbase.ResultColumns) error {
+func (e *virtualDefEntry) validateRow(datums tree.Datums, columns colinfo.ResultColumns) error {
 	if r, c := len(datums), len(columns); r != c {
 		return errors.AssertionFailedf("datum row count and column count differ: %d vs %d", r, c)
 	}
@@ -433,15 +441,15 @@ func (e virtualDefEntry) validateRow(datums tree.Datums, columns sqlbase.ResultC
 // valuesNode for the virtual table. We use deferred construction here
 // so as to avoid populating a RowContainer during query preparation,
 // where we can't guarantee it will be Close()d in case of error.
-func (e virtualDefEntry) getPlanInfo(
-	table sqlbase.TableDescriptor,
+func (e *virtualDefEntry) getPlanInfo(
+	table catalog.TableDescriptor,
 	index *descpb.IndexDescriptor,
 	idxConstraint *constraint.Constraint,
-) (sqlbase.ResultColumns, virtualTableConstructor) {
-	var columns sqlbase.ResultColumns
+) (colinfo.ResultColumns, virtualTableConstructor) {
+	var columns colinfo.ResultColumns
 	for i := range e.desc.Columns {
 		col := &e.desc.Columns[i]
-		columns = append(columns, sqlbase.ResultColumn{
+		columns = append(columns, colinfo.ResultColumn{
 			Name:           col.Name,
 			Typ:            col.Type,
 			TableID:        table.GetID(),
@@ -450,14 +458,16 @@ func (e virtualDefEntry) getPlanInfo(
 	}
 
 	constructor := func(ctx context.Context, p *planner, dbName string) (planNode, error) {
-		var dbDesc *sqlbase.ImmutableDatabaseDescriptor
+		var dbDesc *dbdesc.Immutable
 		if dbName != "" {
 			dbDescI, err := p.LogicalSchemaAccessor().GetDatabaseDesc(ctx, p.txn, p.ExecCfg().Codec,
-				dbName, tree.DatabaseLookupFlags{Required: true, AvoidCached: p.avoidCachedDescriptors})
+				dbName, tree.DatabaseLookupFlags{
+					Required: true, AvoidCached: p.avoidCachedDescriptors,
+				})
 			if err != nil {
 				return nil, err
 			}
-			dbDesc = dbDescI.(*sqlbase.ImmutableDatabaseDescriptor)
+			dbDesc = dbDescI.(*dbdesc.Immutable)
 		} else {
 			if !e.validWithNoDatabaseContext {
 				return nil, errInvalidDbPrefix
@@ -517,37 +527,39 @@ func (e virtualDefEntry) getPlanInfo(
 // makeConstrainedRowsGenerator returns a generator function that can be invoked
 // to push all rows from this virtual table that satisfy the input index
 // constraint to a row pusher that's supplied to the generator function.
-func (e virtualDefEntry) makeConstrainedRowsGenerator(
+func (e *virtualDefEntry) makeConstrainedRowsGenerator(
 	ctx context.Context,
 	p *planner,
-	dbDesc *sqlbase.ImmutableDatabaseDescriptor,
+	dbDesc *dbdesc.Immutable,
 	index *descpb.IndexDescriptor,
 	indexKeyDatums []tree.Datum,
-	columnIdxMap map[descpb.ColumnID]int,
+	columnIdxMap catalog.TableColMap,
 	idxConstraint *constraint.Constraint,
-	columns sqlbase.ResultColumns,
+	columns colinfo.ResultColumns,
 ) func(pusher rowPusher) error {
 	def := e.virtualDef.(virtualSchemaTable)
 	return func(pusher rowPusher) error {
 		var span constraint.Span
-		addRowIfPassesFilter := func(datums ...tree.Datum) error {
-			for i, id := range index.ColumnIDs {
-				indexKeyDatums[i] = datums[columnIdxMap[id]]
-			}
-			// Construct a single key span out of the current row, so that
-			// we can test it for containment within the constraint span of the
-			// filter that we're applying. The results of this containment check
-			// will tell us whether or not to let the current row pass the filter.
-			key := constraint.MakeCompositeKey(indexKeyDatums...)
-			span.Init(key, constraint.IncludeBoundary, key, constraint.IncludeBoundary)
-			var err error
-			if idxConstraint.ContainsSpan(p.EvalContext(), &span) {
-				if err := e.validateRow(datums, columns); err != nil {
-					return err
+		addRowIfPassesFilter := func(idxConstraint *constraint.Constraint) func(datums ...tree.Datum) error {
+			return func(datums ...tree.Datum) error {
+				for i, id := range index.ColumnIDs {
+					indexKeyDatums[i] = datums[columnIdxMap.GetDefault(id)]
 				}
-				return pusher.pushRow(datums...)
+				// Construct a single key span out of the current row, so that
+				// we can test it for containment within the constraint span of the
+				// filter that we're applying. The results of this containment check
+				// will tell us whether or not to let the current row pass the filter.
+				key := constraint.MakeCompositeKey(indexKeyDatums...)
+				span.Init(key, constraint.IncludeBoundary, key, constraint.IncludeBoundary)
+				var err error
+				if idxConstraint.ContainsSpan(p.EvalContext(), &span) {
+					if err := e.validateRow(datums, columns); err != nil {
+						return err
+					}
+					return pusher.pushRow(datums...)
+				}
+				return err
 			}
-			return err
 		}
 
 		// We have a virtual index with a constraint. Run the constrained
@@ -555,13 +567,9 @@ func (e virtualDefEntry) makeConstrainedRowsGenerator(
 		// index for a given span, we exit the loop early and run a "full scan"
 		// over the virtual table, filtering the output using the remaining
 		// spans.
-		// N.B. we count down in this loop so that, if we have to give up half
-		// way through, we can easily truncate the spans we already processed
-		// from the end and use them as a filter for the remaining rows of the
-		// table.
-		currentConstraint := idxConstraint.Spans.Count() - 1
-		for ; currentConstraint >= 0; currentConstraint-- {
-			span := idxConstraint.Spans.Get(currentConstraint)
+		var currentSpan int
+		for ; currentSpan < idxConstraint.Spans.Count(); currentSpan++ {
+			span := idxConstraint.Spans.Get(currentSpan)
 			if span.StartKey().Length() > 1 {
 				return errors.AssertionFailedf(
 					"programming error: can't push down composite constraints into vtables")
@@ -576,7 +584,7 @@ func (e virtualDefEntry) makeConstrainedRowsGenerator(
 			// For each span, run the index's populate method, constrained to the
 			// constraint span's value.
 			found, err := virtualIndex.populate(ctx, constraintDatum, p, dbDesc,
-				addRowIfPassesFilter)
+				addRowIfPassesFilter(idxConstraint))
 			if err != nil {
 				return err
 			}
@@ -586,15 +594,21 @@ func (e virtualDefEntry) makeConstrainedRowsGenerator(
 				break
 			}
 		}
-		if currentConstraint < 0 {
+		if currentSpan == idxConstraint.Spans.Count() {
 			// We successfully processed all constraints, so we can leave now.
 			return nil
 		}
 
 		// Fall back to a full scan of the table, using the remaining filters
 		// that weren't able to be used as constraints.
-		idxConstraint.Spans.Truncate(currentConstraint + 1)
-		return def.populate(ctx, p, dbDesc, addRowIfPassesFilter)
+		newConstraint := *idxConstraint
+		newConstraint.Spans = constraint.Spans{}
+		nSpans := idxConstraint.Spans.Count() - currentSpan
+		newConstraint.Spans.Alloc(nSpans)
+		for ; currentSpan < idxConstraint.Spans.Count(); currentSpan++ {
+			newConstraint.Spans.Append(idxConstraint.Spans.Get(currentSpan))
+		}
+		return def.populate(ctx, p, dbDesc, addRowIfPassesFilter(&newConstraint))
 	}
 }
 
@@ -603,7 +617,7 @@ func NewVirtualSchemaHolder(
 	ctx context.Context, st *cluster.Settings,
 ) (*VirtualSchemaHolder, error) {
 	vs := &VirtualSchemaHolder{
-		entries:      make(map[string]virtualSchemaEntry, len(virtualSchemas)),
+		entries:      make(map[string]*virtualSchemaEntry, len(virtualSchemas)),
 		orderedNames: make([]string, len(virtualSchemas)),
 		defsByID:     make(map[descpb.ID]*virtualDefEntry, math.MaxUint32-catconstants.MinVirtualID),
 	}
@@ -612,7 +626,7 @@ func NewVirtualSchemaHolder(
 	for schemaID, schema := range virtualSchemas {
 		dbName := schema.name
 		dbDesc := initVirtualDatabaseDesc(schemaID, dbName)
-		defs := make(map[string]virtualDefEntry, len(schema.tableDefs))
+		defs := make(map[string]*virtualDefEntry, len(schema.tableDefs))
 		orderedDefNames := make([]string, 0, len(schema.tableDefs))
 
 		for id, def := range schema.tableDefs {
@@ -629,20 +643,20 @@ func NewVirtualSchemaHolder(
 				}
 			}
 
-			entry := virtualDefEntry{
+			entry := &virtualDefEntry{
 				virtualDef:                 def,
-				desc:                       &tableDesc,
+				desc:                       tabledesc.NewImmutable(tableDesc),
 				validWithNoDatabaseContext: schema.validWithNoDatabaseContext,
 				comment:                    def.getComment(),
 			}
 			defs[tableDesc.Name] = entry
-			vs.defsByID[tableDesc.ID] = &entry
+			vs.defsByID[tableDesc.ID] = entry
 			orderedDefNames = append(orderedDefNames, tableDesc.Name)
 		}
 
 		sort.Strings(orderedDefNames)
 
-		vs.entries[dbName] = virtualSchemaEntry{
+		vs.entries[dbName] = &virtualSchemaEntry{
 			desc:            dbDesc,
 			defs:            defs,
 			orderedDefNames: orderedDefNames,
@@ -661,15 +675,20 @@ func NewVirtualSchemaHolder(
 // For instance, information_schema will only expose rows to a given user which that
 // user has access to.
 var publicSelectPrivileges = descpb.NewPrivilegeDescriptor(
-	security.PublicRole, privilege.List{privilege.SELECT}, security.NodeUser,
+	security.PublicRoleName(), privilege.List{privilege.SELECT}, security.NodeUserName(),
 )
 
-func initVirtualDatabaseDesc(id descpb.ID, name string) *sqlbase.ImmutableDatabaseDescriptor {
-	return sqlbase.NewInitialDatabaseDescriptorWithPrivileges(id, name, publicSelectPrivileges)
+func initVirtualDatabaseDesc(id descpb.ID, name string) *dbdesc.Immutable {
+	return dbdesc.NewImmutable(descpb.DatabaseDescriptor{
+		Name:       name,
+		ID:         id,
+		Version:    1,
+		Privileges: publicSelectPrivileges,
+	})
 }
 
 // getEntries is part of the VirtualTabler interface.
-func (vs *VirtualSchemaHolder) getEntries() map[string]virtualSchemaEntry {
+func (vs *VirtualSchemaHolder) getEntries() map[string]*virtualSchemaEntry {
 	return vs.entries
 }
 
@@ -680,7 +699,7 @@ func (vs *VirtualSchemaHolder) getSchemaNames() []string {
 
 // getVirtualSchemaEntry retrieves a virtual schema entry given a database name.
 // getVirtualSchemaEntry is part of the VirtualTabler interface.
-func (vs *VirtualSchemaHolder) getVirtualSchemaEntry(name string) (virtualSchemaEntry, bool) {
+func (vs *VirtualSchemaHolder) getVirtualSchemaEntry(name string) (*virtualSchemaEntry, bool) {
 	e, ok := vs.entries[name]
 	return e, ok
 }
@@ -690,37 +709,37 @@ func (vs *VirtualSchemaHolder) getVirtualSchemaEntry(name string) (virtualSchema
 // a specific table. It will return an error if the name references a virtual database
 // but the table is non-existent.
 // getVirtualTableEntry is part of the VirtualTabler interface.
-func (vs *VirtualSchemaHolder) getVirtualTableEntry(tn *tree.TableName) (virtualDefEntry, error) {
+func (vs *VirtualSchemaHolder) getVirtualTableEntry(tn *tree.TableName) (*virtualDefEntry, error) {
 	if db, ok := vs.getVirtualSchemaEntry(tn.Schema()); ok {
 		tableName := tn.Table()
 		if t, ok := db.defs[tableName]; ok {
 			return t, nil
 		}
 		if _, ok := db.allTableNames[tableName]; ok {
-			return virtualDefEntry{}, unimplemented.NewWithIssueDetailf(8675,
+			return nil, unimplemented.NewWithIssueDetailf(8675,
 				tn.Schema()+"."+tableName,
 				"virtual schema table not implemented: %s.%s", tn.Schema(), tableName)
 		}
-		return virtualDefEntry{}, sqlbase.NewUndefinedRelationError(tn)
+		return nil, sqlerrors.NewUndefinedRelationError(tn)
 	}
-	return virtualDefEntry{}, nil
+	return nil, nil
 }
 
-func (vs *VirtualSchemaHolder) getVirtualTableEntryByID(id descpb.ID) (virtualDefEntry, error) {
+func (vs *VirtualSchemaHolder) getVirtualTableEntryByID(id descpb.ID) (*virtualDefEntry, error) {
 	entry, ok := vs.defsByID[id]
 	if !ok {
-		return virtualDefEntry{}, sqlbase.ErrDescriptorNotFound
+		return nil, catalog.ErrDescriptorNotFound
 	}
-	return *entry, nil
+	return entry, nil
 }
 
 // VirtualTabler is used to fetch descriptors for virtual tables and databases.
 type VirtualTabler interface {
-	getVirtualTableDesc(tn *tree.TableName) (*descpb.TableDescriptor, error)
-	getVirtualSchemaEntry(name string) (virtualSchemaEntry, bool)
-	getVirtualTableEntry(tn *tree.TableName) (virtualDefEntry, error)
-	getVirtualTableEntryByID(id descpb.ID) (virtualDefEntry, error)
-	getEntries() map[string]virtualSchemaEntry
+	getVirtualTableDesc(tn *tree.TableName) (*tabledesc.Immutable, error)
+	getVirtualSchemaEntry(name string) (*virtualSchemaEntry, bool)
+	getVirtualTableEntry(tn *tree.TableName) (*virtualDefEntry, error)
+	getVirtualTableEntryByID(id descpb.ID) (*virtualDefEntry, error)
+	getEntries() map[string]*virtualSchemaEntry
 	getSchemaNames() []string
 }
 
@@ -729,9 +748,9 @@ type VirtualTabler interface {
 // getVirtualTableDesc is part of the VirtualTabler interface.
 func (vs *VirtualSchemaHolder) getVirtualTableDesc(
 	tn *tree.TableName,
-) (*descpb.TableDescriptor, error) {
+) (*tabledesc.Immutable, error) {
 	t, err := vs.getVirtualTableEntry(tn)
-	if err != nil {
+	if err != nil || t == nil {
 		return nil, err
 	}
 	return t.desc, nil

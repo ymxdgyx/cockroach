@@ -108,7 +108,7 @@ func (s *Store) Send(
 			// can use it to shorten its uncertainty interval when it comes back to
 			// this node.
 			if pErr != nil {
-				pErr.OriginNode = ba.Replica.NodeID
+				pErr.OriginNode = s.NodeID()
 				if txn := pErr.GetTxn(); txn == nil {
 					pErr.SetTxn(ba.Txn)
 				}
@@ -150,9 +150,9 @@ func (s *Store) Send(
 		// updating the top end of our uncertainty timestamp would lead to a
 		// restart (at least in the absence of a prior observed timestamp from
 		// this node, in which case the following is a no-op).
-		if _, ok := ba.Txn.GetObservedTimestamp(ba.Replica.NodeID); !ok {
+		if _, ok := ba.Txn.GetObservedTimestamp(s.NodeID()); !ok {
 			txnClone := ba.Txn.Clone()
-			txnClone.UpdateObservedTimestamp(ba.Replica.NodeID, s.cfg.Clock.Now())
+			txnClone.UpdateObservedTimestamp(s.NodeID(), s.Clock().Now())
 			ba.Txn = txnClone
 		}
 	}
@@ -199,6 +199,13 @@ func (s *Store) Send(
 	// Augment error if necessary and return.
 	switch t := pErr.GetDetail().(type) {
 	case *roachpb.RangeKeyMismatchError:
+		// TODO(andrei): It seems silly that, if the client specified a RangeID that
+		// doesn't match the keys it wanted to access, but this node can serve those
+		// keys anyway, we still return a RangeKeyMismatchError to the client
+		// instead of serving the request. Particularly since we have the mechanism
+		// to communicate correct range information to the client when returning a
+		// successful response (i.e. br.RangeInfos).
+
 		// On a RangeKeyMismatchError where the batch didn't even overlap
 		// the start of the mismatched Range, try to suggest a more suitable
 		// Range from this Store.
@@ -223,7 +230,8 @@ func (s *Store) Send(
 		if endKey.Less(rSpan.EndKey) {
 			endKey = rSpan.EndKey
 		}
-		s.VisitReplicasByKey(ctx, startKey, endKey, func(ctx context.Context, r KeyRange) bool {
+		var ris []roachpb.RangeInfo
+		s.VisitReplicasByKey(ctx, startKey, endKey, AscendingKeyOrder, func(ctx context.Context, r KeyRange) bool {
 			var l roachpb.Lease
 			var desc roachpb.RangeDescriptor
 			if rep, ok := r.(*Replica); ok {
@@ -236,9 +244,14 @@ func (s *Store) Send(
 			if desc.RangeID == skipRID {
 				return true // continue visiting
 			}
-			t.AppendRangeInfo(ctx, desc, l)
+			ris = append(ris, roachpb.RangeInfo{Desc: desc, Lease: l})
 			return true // continue visiting
 		})
+		for _, ri := range ris {
+			t.AppendRangeInfo(ctx, ri.Desc, ri.Lease)
+		}
+		// We have to write `t` back to `pErr` so that it picks up the changes.
+		pErr = roachpb.NewError(t)
 	case *roachpb.RaftGroupDeletedError:
 		// This error needs to be converted appropriately so that clients
 		// will retry.

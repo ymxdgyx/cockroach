@@ -12,7 +12,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
@@ -20,7 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/errors"
 )
 
 // OperatorInitStatus indicates whether Init method has already been called on
@@ -62,7 +61,7 @@ func (n OneInputNode) Child(nth int, verbose bool) execinfra.OpNode {
 	if nth == 0 {
 		return n.input
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid index %d", nth))
+	colexecerror.InternalError(errors.AssertionFailedf("invalid index %d", nth))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
 }
@@ -93,23 +92,9 @@ func (n *twoInputNode) Child(nth int, verbose bool) execinfra.OpNode {
 	case 1:
 		return n.inputTwo
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid idx %d", nth))
+	colexecerror.InternalError(errors.AssertionFailedf("invalid idx %d", nth))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
-}
-
-// TODO(yuzefovich): audit all Operators to make sure that all internal memory
-// is accounted for.
-
-// InternalMemoryOperator is an interface that operators which use internal
-// memory need to implement. "Internal memory" is defined as memory that is
-// "private" to the operator and is not exposed to the outside; notably, it
-// does *not* include any coldata.Batch'es and coldata.Vec's.
-type InternalMemoryOperator interface {
-	colexecbase.Operator
-	// InternalMemoryUsage reports the internal memory usage (in bytes) of an
-	// operator.
-	InternalMemoryUsage() int
 }
 
 // resetter is an interface that operators can implement if they can be reset
@@ -124,48 +109,13 @@ type ResettableOperator interface {
 	resetter
 }
 
-// Closer is an object that releases resources when Close is called. Note that
-// this interface must be implemented by all operators that could be planned on
-// top of other operators that do actually need to release the resources (e.g.
-// if we have a simple project on top of a disk-backed operator, that simple
-// project needs to implement this interface so that Close() call could be
-// propagated correctly).
-type Closer interface {
-	Close(ctx context.Context) error
-}
-
-// Closers is a slice of Closers.
-type Closers []Closer
-
-// CloseAndLogOnErr closes all Closers and logs the error if the log verbosity
-// is 1 or higher. The given prefix is prepended to the log message.
-// Note: this method should *only* be used when returning an error doesn't make
-// sense.
-func (c Closers) CloseAndLogOnErr(ctx context.Context, prefix string) {
-	prefix += ":"
-	for _, closer := range c {
-		if err := closer.Close(ctx); err != nil && log.V(1) {
-			log.Infof(ctx, "%s error closing Closer: %v", prefix, err)
-		}
-	}
-}
-
-// Close closes all Closers and returns the last error (if any occurs).
-func (c Closers) Close(ctx context.Context) error {
-	var lastErr error
-	for _, closer := range c {
-		if err := closer.Close(ctx); err != nil {
-			lastErr = err
-		}
-	}
-	return lastErr
-}
-
 // CallbackCloser is a utility struct that implements the Closer interface by
 // calling a provided callback.
 type CallbackCloser struct {
 	CloseCb func(context.Context) error
 }
+
+var _ colexecbase.Closer = &CallbackCloser{}
 
 // Close implements the Closer interface.
 func (c *CallbackCloser) Close(ctx context.Context) error {
@@ -192,7 +142,7 @@ func (c *closerHelper) close() bool {
 
 type closableOperator interface {
 	colexecbase.Operator
-	Closer
+	colexecbase.Closer
 }
 
 func makeOneInputCloserHelper(input colexecbase.Operator) oneInputCloserHelper {
@@ -206,13 +156,13 @@ type oneInputCloserHelper struct {
 	closerHelper
 }
 
-var _ Closer = &oneInputCloserHelper{}
+var _ colexecbase.Closer = &oneInputCloserHelper{}
 
 func (c *oneInputCloserHelper) Close(ctx context.Context) error {
 	if !c.close() {
 		return nil
 	}
-	if closer, ok := c.input.(Closer); ok {
+	if closer, ok := c.input.(colexecbase.Closer); ok {
 		return closer.Close(ctx)
 	}
 	return nil
@@ -264,53 +214,43 @@ func (s *zeroOperator) Next(ctx context.Context) coldata.Batch {
 	return coldata.ZeroBatch
 }
 
-type zeroOperatorNoInput struct {
+type fixedNumTuplesNoInputOp struct {
 	colexecbase.ZeroInputNode
 	NonExplainable
+	batch         coldata.Batch
+	numTuplesLeft int
 }
 
-var _ colexecbase.Operator = &zeroOperatorNoInput{}
+var _ colexecbase.Operator = &fixedNumTuplesNoInputOp{}
 
-// NewZeroOpNoInput creates a new operator which just returns an empty batch
-// and doesn't an input.
-func NewZeroOpNoInput() colexecbase.Operator {
-	return &zeroOperatorNoInput{}
-}
-
-func (s *zeroOperatorNoInput) Init() {}
-
-func (s *zeroOperatorNoInput) Next(ctx context.Context) coldata.Batch {
-	return coldata.ZeroBatch
-}
-
-type singleTupleNoInputOperator struct {
-	colexecbase.ZeroInputNode
-	NonExplainable
-	batch  coldata.Batch
-	nexted bool
-}
-
-var _ colexecbase.Operator = &singleTupleNoInputOperator{}
-
-// NewSingleTupleNoInputOp creates a new Operator which returns a batch of
-// length 1 with no actual columns on the first call to Next() and zero-length
-// batches on all consecutive calls.
-func NewSingleTupleNoInputOp(allocator *colmem.Allocator) colexecbase.Operator {
-	return &singleTupleNoInputOperator{
-		batch: allocator.NewMemBatchWithFixedCapacity(nil /* types */, 1 /* size */),
+// NewFixedNumTuplesNoInputOp creates a new Operator which returns batches with
+// no actual columns that have specified number of tuples as the sum of their
+// lengths.
+func NewFixedNumTuplesNoInputOp(allocator *colmem.Allocator, numTuples int) colexecbase.Operator {
+	capacity := numTuples
+	if capacity > coldata.BatchSize() {
+		capacity = coldata.BatchSize()
+	}
+	return &fixedNumTuplesNoInputOp{
+		batch:         allocator.NewMemBatchWithFixedCapacity(nil /* types */, capacity),
+		numTuplesLeft: numTuples,
 	}
 }
 
-func (s *singleTupleNoInputOperator) Init() {
+func (s *fixedNumTuplesNoInputOp) Init() {
 }
 
-func (s *singleTupleNoInputOperator) Next(ctx context.Context) coldata.Batch {
+func (s *fixedNumTuplesNoInputOp) Next(context.Context) coldata.Batch {
 	s.batch.ResetInternalBatch()
-	if s.nexted {
+	if s.numTuplesLeft == 0 {
 		return coldata.ZeroBatch
 	}
-	s.nexted = true
-	s.batch.SetLength(1)
+	length := s.numTuplesLeft
+	if length > coldata.BatchSize() {
+		length = coldata.BatchSize()
+	}
+	s.numTuplesLeft -= length
+	s.batch.SetLength(length)
 	return s.batch
 }
 
@@ -449,7 +389,7 @@ func NewBatchSchemaSubsetEnforcer(
 func (e *BatchSchemaSubsetEnforcer) Init() {
 	e.input.Init()
 	if e.subsetStartIdx >= e.subsetEndIdx {
-		colexecerror.InternalError("unexpectedly subsetStartIdx is not less than subsetEndIdx")
+		colexecerror.InternalError(errors.AssertionFailedf("unexpectedly subsetStartIdx is not less than subsetEndIdx"))
 	}
 }
 

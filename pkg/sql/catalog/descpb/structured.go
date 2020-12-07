@@ -37,6 +37,9 @@ func (dir IndexDescriptor_Direction) ToEncodingDirection() (encoding.Direction, 
 // ID is a custom type for {Database,Table}Descriptor IDs.
 type ID tree.ID
 
+// SafeValue implements the redact.SafeValue interface.
+func (ID) SafeValue() {}
+
 // InvalidID is the uninitialised descriptor id.
 const InvalidID ID = 0
 
@@ -68,14 +71,26 @@ const (
 // FamilyID is a custom type for ColumnFamilyDescriptor IDs.
 type FamilyID uint32
 
+// SafeValue implements the redact.SafeValue interface.
+func (FamilyID) SafeValue() {}
+
 // IndexID is a custom type for IndexDescriptor IDs.
 type IndexID tree.IndexID
+
+// SafeValue implements the redact.SafeValue interface.
+func (IndexID) SafeValue() {}
 
 // DescriptorVersion is a custom type for TableDescriptor Versions.
 type DescriptorVersion uint32
 
+// SafeValue implements the redact.SafeValue interface.
+func (DescriptorVersion) SafeValue() {}
+
 // IndexDescriptorVersion is a custom type for IndexDescriptor Versions.
 type IndexDescriptorVersion uint32
+
+// SafeValue implements the redact.SafeValue interface.
+func (IndexDescriptorVersion) SafeValue() {}
 
 const (
 	// BaseIndexFormatVersion corresponds to the original encoding of secondary indexes that
@@ -85,10 +100,17 @@ const (
 	// SecondaryIndexFamilyFormatVersion corresponds to the encoding of secondary indexes that
 	// use table level column family definitions.
 	SecondaryIndexFamilyFormatVersion
+	// EmptyArraysInInvertedIndexesVersion corresponds to the encoding of secondary indexes
+	// that is identical to SecondaryIndexFamilyFormatVersion, but also includes a key encoding
+	// for empty arrays in array inverted indexes.
+	EmptyArraysInInvertedIndexesVersion
 )
 
 // ColumnID is a custom type for ColumnDescriptor IDs.
 type ColumnID tree.ColumnID
+
+// SafeValue implements the redact.SafeValue interface.
+func (ColumnID) SafeValue() {}
 
 // ColumnIDs is a slice of ColumnDescriptor IDs.
 type ColumnIDs []ColumnID
@@ -153,6 +175,9 @@ var _ = SecondaryIndexEncoding
 // MutationID is a custom type for TableDescriptor mutations.
 type MutationID uint32
 
+// SafeValue implements the redact.SafeValue interface.
+func (MutationID) SafeValue() {}
+
 // InvalidMutationID is the uninitialised mutation id.
 const InvalidMutationID MutationID = 0
 
@@ -194,19 +219,24 @@ func (desc *PartitioningDescriptor) PartitionNames() []string {
 	return names
 }
 
+// Public implements the Descriptor interface.
+func (desc *TableDescriptor) Public() bool {
+	return desc.State == DescriptorState_PUBLIC
+}
+
 // Offline returns true if the table is importing.
 func (desc *TableDescriptor) Offline() bool {
-	return desc.State == TableDescriptor_OFFLINE
+	return desc.State == DescriptorState_OFFLINE
 }
 
 // Dropped returns true if the table is being dropped.
 func (desc *TableDescriptor) Dropped() bool {
-	return desc.State == TableDescriptor_DROP
+	return desc.State == DescriptorState_DROP
 }
 
 // Adding returns true if the table is being added.
 func (desc *TableDescriptor) Adding() bool {
-	return desc.State == TableDescriptor_ADD
+	return desc.State == DescriptorState_ADD
 }
 
 // IsTable returns true if the TableDescriptor actually describes a
@@ -254,11 +284,6 @@ func (desc *TableDescriptor) Persistence() tree.Persistence {
 	return tree.PersistencePermanent
 }
 
-// Dropped returns true if the type is dropped.
-func (desc *TypeDescriptor) Dropped() bool {
-	return desc.State == TypeDescriptor_DROP
-}
-
 // IsVirtualTable returns true if the TableDescriptor describes a
 // virtual Table (like the information_schema tables) and thus doesn't
 // need to be physically stored.
@@ -283,4 +308,52 @@ var AnonymousTable = tree.TableName{}
 // HasOwner returns true if the sequence options indicate an owner exists.
 func (opts *TableDescriptor_SequenceOpts) HasOwner() bool {
 	return !opts.SequenceOwner.Equal(TableDescriptor_SequenceOpts_SequenceOwner{})
+}
+
+// SafeValue implements the redact.SafeValue interface.
+func (ConstraintValidity) SafeValue() {}
+
+// SafeValue implements the redact.SafeValue interface.
+func (DescriptorMutation_Direction) SafeValue() {}
+
+// SafeValue implements the redact.SafeValue interface.
+func (DescriptorMutation_State) SafeValue() {}
+
+// SafeValue implements the redact.SafeValue interface.
+func (DescriptorState) SafeValue() {}
+
+// SafeValue implements the redact.SafeValue interface.
+func (ConstraintType) SafeValue() {}
+
+// IsMultiRegion returns whether the database has multi-region properties
+// configured. If so, desc.RegionConfig can be used.
+func (desc *DatabaseDescriptor) IsMultiRegion() bool {
+	return desc.RegionConfig != nil
+}
+
+// Regions returns the multi-region regions that have been added to a database.
+func (desc *DatabaseDescriptor) Regions() (Regions, error) {
+	if !desc.IsMultiRegion() {
+		return nil, errors.AssertionFailedf(
+			"can not get regions of a non multi-region database")
+	}
+	return desc.RegionConfig.Regions, nil
+}
+
+// PrimaryRegion returns the primary region for a multi-region database.
+func (desc *DatabaseDescriptor) PrimaryRegion() (Region, error) {
+	if !desc.IsMultiRegion() {
+		return "", errors.AssertionFailedf(
+			"can not get the primary region of a non multi-region database")
+	}
+	return desc.RegionConfig.PrimaryRegion, nil
+}
+
+// PrimaryRegion returns the primary region for a multi-region type descriptor.
+func (desc *TypeDescriptor) PrimaryRegion() (Region, error) {
+	if desc.Kind != TypeDescriptor_MULTIREGION_ENUM {
+		return "", errors.AssertionFailedf(
+			"can not get primary region of a non multi-region type desc")
+	}
+	return desc.RegionConfig.PrimaryRegion, nil
 }

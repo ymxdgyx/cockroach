@@ -25,7 +25,7 @@ import (
 /*
 Format for the datadriven test:
 
-new-span-leaf name=<name> tight=<true|false> span=<start>[,<end>]
+new-span-leaf name=<name> tight=<true|false> unique=<true|false> span=<start>[,<end>]
 ----
 <SpanExpression as string>
 
@@ -83,6 +83,9 @@ func (u UnknownExpression) SetNotTight()  { u.tight = false }
 func (u UnknownExpression) String() string {
 	return fmt.Sprintf("unknown expression: tight=%t", u.tight)
 }
+func (u UnknownExpression) Copy() InvertedExpression {
+	return UnknownExpression{tight: u.tight}
+}
 
 // Makes a (shallow) copy of the root node of the expression identified
 // by name, since calls to And() and Or() can modify that root node, and
@@ -98,6 +101,7 @@ func getExprCopy(
 	case *SpanExpression:
 		return &SpanExpression{
 			Tight:              e.Tight,
+			Unique:             e.Unique,
 			SpansToRead:        append([]InvertedSpan(nil), e.SpansToRead...),
 			FactoredUnionSpans: append([]InvertedSpan(nil), e.FactoredUnionSpans...),
 			Operator:           e.Operator,
@@ -138,10 +142,12 @@ func TestExpression(t *testing.T) {
 		case "new-span-leaf":
 			var name string
 			d.ScanArgs(t, "name", &name)
-			var tight bool
+			var tight, unique bool
 			d.ScanArgs(t, "tight", &tight)
+			d.ScanArgs(t, "unique", &unique)
 			span := getSpan(t, d)
 			expr := ExprForInvertedSpan(span, tight)
+			expr.Unique = unique
 			exprsByName[name] = expr
 			return expr.String()
 		case "new-unknown-leaf":

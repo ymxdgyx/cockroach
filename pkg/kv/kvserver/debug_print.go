@@ -24,7 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
-	"go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 // PrintKeyValue attempts to pretty-print the specified MVCCKeyValue to
@@ -38,6 +38,9 @@ func SprintKey(key storage.MVCCKey) string {
 	return fmt.Sprintf("%s %s (%#x): ", key.Timestamp, key.Key, storage.EncodeKey(key))
 }
 
+// DebugSprintKeyValueDecoders allows injecting alternative debug decoders.
+var DebugSprintKeyValueDecoders []func(kv storage.MVCCKeyValue) (string, error)
+
 // SprintKeyValue is like PrintKeyValue, but returns a string. If
 // printKey is true, prints the key and the value together; otherwise,
 // prints just the value.
@@ -46,7 +49,8 @@ func SprintKeyValue(kv storage.MVCCKeyValue, printKey bool) string {
 	if printKey {
 		sb.WriteString(SprintKey(kv.Key))
 	}
-	decoders := []func(kv storage.MVCCKeyValue) (string, error){
+
+	decoders := append(DebugSprintKeyValueDecoders,
 		tryRaftLogEntry,
 		tryRangeDescriptor,
 		tryMeta,
@@ -58,7 +62,8 @@ func SprintKeyValue(kv storage.MVCCKeyValue, printKey bool) string {
 			// No better idea, just print raw bytes and hope that folks use `less -S`.
 			return fmt.Sprintf("%q", kv.Value), nil
 		},
-	}
+	)
+
 	for _, decoder := range decoders {
 		out, err := decoder(kv)
 		if err != nil {
@@ -81,6 +86,7 @@ func tryRangeDescriptor(kv storage.MVCCKeyValue) (string, error) {
 	return descStr(desc), nil
 }
 
+// tryIntent does not look at the key.
 func tryIntent(kv storage.MVCCKeyValue) (string, error) {
 	if len(kv.Value) == 0 {
 		return "", errors.New("empty")
@@ -229,7 +235,7 @@ func tryTxn(kv storage.MVCCKeyValue) (string, error) {
 }
 
 func tryRangeIDKey(kv storage.MVCCKeyValue) (string, error) {
-	if kv.Key.Timestamp != (hlc.Timestamp{}) {
+	if !kv.Key.Timestamp.IsEmpty() {
 		return "", fmt.Errorf("range ID keys shouldn't have timestamps: %s", kv.Key)
 	}
 	_, _, suffix, _, err := keys.DecodeRangeIDKey(kv.Key.Key)
@@ -368,4 +374,21 @@ func (s *stringifyWriteBatch) String() string {
 		return wbStr
 	}
 	return fmt.Sprintf("failed to stringify write batch (%x): %s", s.Data, err)
+}
+
+// PrintEngineKeyValue attempts to print the given key-value pair.
+func PrintEngineKeyValue(k storage.EngineKey, v []byte) {
+	if k.IsMVCCKey() {
+		if key, err := k.ToMVCCKey(); err == nil {
+			PrintKeyValue(storage.MVCCKeyValue{Key: key, Value: v})
+			return
+		}
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s %x (%#x): ", k.Key, k.Version, k.Encode())
+	if out, err := tryIntent(storage.MVCCKeyValue{Value: v}); err == nil {
+		sb.WriteString(out)
+	} else {
+		fmt.Fprintf(&sb, "%x", v)
+	}
 }

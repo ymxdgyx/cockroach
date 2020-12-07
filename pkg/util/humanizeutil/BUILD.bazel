@@ -1,0 +1,26 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "humanizeutil",
+    srcs = [
+        "count.go",
+        "duration.go",
+        "humanize.go",
+    ],
+    importpath = "github.com/cockroachdb/cockroach/pkg/util/humanizeutil",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//vendor/github.com/dustin/go-humanize",
+        "//vendor/github.com/spf13/pflag",
+    ],
+)
+
+go_test(
+    name = "humanizeutil_test",
+    srcs = [
+        "duration_test.go",
+        "humanize_test.go",
+    ],
+    embed = [":humanizeutil"],
+    deps = ["//pkg/util/leaktest"],
+)

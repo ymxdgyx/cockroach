@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -321,7 +321,7 @@ func runDecommissionNode(cmd *cobra.Command, args []string) error {
 
 	conn, _, finish, err := getClientGRPCConn(ctx, serverCfg)
 	if err != nil {
-		return errors.Wrap(err, "Failed to connect to the node")
+		return errors.Wrap(err, "failed to connect to the node")
 	}
 	defer finish()
 
@@ -337,7 +337,17 @@ func runDecommissionNode(cmd *cobra.Command, args []string) error {
 	}
 
 	c := serverpb.NewAdminClient(conn)
-	return runDecommissionNodeImpl(ctx, c, nodeCtx.nodeDecommissionWait, nodeIDs)
+	if err := runDecommissionNodeImpl(ctx, c, nodeCtx.nodeDecommissionWait, nodeIDs); err != nil {
+		cause := errors.UnwrapAll(err)
+		if s, ok := status.FromError(cause); ok && s.Code() == codes.NotFound {
+			// Are we trying to decommision a node that does not
+			// exist? See Server.Decommission for where this specific grpc error
+			// code is generated.
+			return errors.New("node does not exist")
+		}
+		return err
+	}
+	return nil
 }
 
 func handleNodeDecommissionSelf(
@@ -379,8 +389,8 @@ func expectNodesDecommissioned(
 			// The user is expecting the node to not be
 			// decommissioned/decommissioning already.
 			switch liveness {
-			case kvserverpb.NodeLivenessStatus_DECOMMISSIONING,
-				kvserverpb.NodeLivenessStatus_DECOMMISSIONED:
+			case livenesspb.NodeLivenessStatus_DECOMMISSIONING,
+				livenesspb.NodeLivenessStatus_DECOMMISSIONED:
 				fmt.Fprintln(stderr, "warning: node", nodeID, "is already decommissioning or decommissioned")
 			default:
 				// It's always possible to decommission a node that's either live
@@ -389,10 +399,10 @@ func expectNodesDecommissioned(
 		} else {
 			// The user is expecting the node to be recommissionable.
 			switch liveness {
-			case kvserverpb.NodeLivenessStatus_DECOMMISSIONING,
-				kvserverpb.NodeLivenessStatus_DECOMMISSIONED:
+			case livenesspb.NodeLivenessStatus_DECOMMISSIONING,
+				livenesspb.NodeLivenessStatus_DECOMMISSIONED:
 				// ok.
-			case kvserverpb.NodeLivenessStatus_LIVE:
+			case livenesspb.NodeLivenessStatus_LIVE:
 				fmt.Fprintln(stderr, "warning: node", nodeID, "is not decommissioned")
 			default: // dead, unavailable, etc
 				fmt.Fprintln(stderr, "warning: node", nodeID, "is in unexpected state", liveness)
@@ -425,7 +435,7 @@ func runDecommissionNodeImpl(
 	for r := retry.StartWithCtx(ctx, opts); r.Next(); {
 		req := &serverpb.DecommissionRequest{
 			NodeIDs:          nodeIDs,
-			TargetMembership: kvserverpb.MembershipStatus_DECOMMISSIONING,
+			TargetMembership: livenesspb.MembershipStatus_DECOMMISSIONING,
 		}
 		resp, err := c.Decommission(ctx, req)
 		if err != nil {
@@ -454,7 +464,7 @@ func runDecommissionNodeImpl(
 			// We now mark the nodes as fully decommissioned.
 			req := &serverpb.DecommissionRequest{
 				NodeIDs:          nodeIDs,
-				TargetMembership: kvserverpb.MembershipStatus_DECOMMISSIONED,
+				TargetMembership: livenesspb.MembershipStatus_DECOMMISSIONED,
 			}
 			resp, err := c.Decommission(ctx, req)
 			if err != nil {
@@ -544,7 +554,7 @@ func runRecommissionNode(cmd *cobra.Command, args []string) error {
 
 	conn, _, finish, err := getClientGRPCConn(ctx, serverCfg)
 	if err != nil {
-		return errors.Wrap(err, "Failed to connect to the node")
+		return errors.Wrap(err, "failed to connect to the node")
 	}
 	defer finish()
 
@@ -562,16 +572,23 @@ func runRecommissionNode(cmd *cobra.Command, args []string) error {
 	c := serverpb.NewAdminClient(conn)
 	req := &serverpb.DecommissionRequest{
 		NodeIDs:          nodeIDs,
-		TargetMembership: kvserverpb.MembershipStatus_ACTIVE,
+		TargetMembership: livenesspb.MembershipStatus_ACTIVE,
 	}
 	resp, err := c.Decommission(ctx, req)
 	if err != nil {
+		cause := errors.UnwrapAll(err)
 		// If it's a specific illegal membership transition error, we try to
-		// surface a more readable message to the user. See
-		// ValidateLivenessTransition in kvserverpb/liveness.go for where this
-		// error is generated.
-		if s, ok := status.FromError(err); ok && s.Code() == codes.FailedPrecondition {
+		// surface a more readable message to the user. See ValidateTransition
+		// in pkg/liveness/livenesspb for where this error is generated.
+		if s, ok := status.FromError(cause); ok && s.Code() == codes.FailedPrecondition {
 			return errors.Newf("%s", s.Message())
+		}
+		if s, ok := status.FromError(cause); ok && s.Code() == codes.NotFound {
+			// Are we trying to recommission node that does not
+			// exist? See Server.Decommission for where this specific grpc error
+			// code is generated.
+			fmt.Fprintln(stderr)
+			return errors.New("node does not exist")
 		}
 		return err
 	}
@@ -582,15 +599,20 @@ var drainNodeCmd = &cobra.Command{
 	Use:   "drain",
 	Short: "drain a node without shutting it down",
 	Long: `
-Prepare a server for shutting down. This stops accepting client
-connections, stops extant connections, and finally pushes range
-leases onto other nodes, subject to various timeout parameters
-configurable via cluster settings.`,
+Prepare a server so it becomes ready to be shut down safely.
+This causes the server to stop accepting client connections, stop
+extant connections, and finally push range leases onto other
+nodes, subject to various timeout parameters configurable via
+cluster settings.
+
+After a successful drain, the server process is still running;
+use a service manager or orchestrator to terminate the process
+gracefully using e.g. a unix signal.`,
 	Args: cobra.NoArgs,
 	RunE: MaybeDecorateGRPCError(runDrain),
 }
 
-// runNodeDrain calls the Drain RPC without the flag to stop the
+// runDrain calls the Drain RPC without the flag to stop the
 // server process.
 func runDrain(cmd *cobra.Command, args []string) (err error) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -625,7 +647,7 @@ var nodeCmds = []*cobra.Command{
 
 var nodeCmd = &cobra.Command{
 	Use:   "node [command]",
-	Short: "list, inspect, drain or remove nodes",
+	Short: "list, inspect, drain or remove nodes\n",
 	Long:  "List, inspect, drain or remove nodes.",
 	RunE:  usageAndErr,
 }

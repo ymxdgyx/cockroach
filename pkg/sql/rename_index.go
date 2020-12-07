@@ -12,21 +12,21 @@ package sql
 
 import (
 	"context"
-	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
 var errEmptyIndexName = pgerror.New(pgcode.Syntax, "empty index name")
 
 type renameIndexNode struct {
 	n         *tree.RenameIndex
-	tableDesc *sqlbase.MutableTableDescriptor
+	tableDesc *tabledesc.Mutable
 	idx       *descpb.IndexDescriptor
 }
 
@@ -35,6 +35,14 @@ type renameIndexNode struct {
 //   notes: postgres requires CREATE on the table.
 //          mysql requires ALTER, CREATE, INSERT on the table.
 func (p *planner) RenameIndex(ctx context.Context, n *tree.RenameIndex) (planNode, error) {
+	if err := checkSchemaChangeEnabled(
+		ctx,
+		&p.ExecCfg().Settings.SV,
+		"RENAME INDEX",
+	); err != nil {
+		return nil, err
+	}
+
 	_, tableDesc, err := expandMutableIndexName(ctx, p, n.Index, !n.IfExists /* requireTable */)
 	if err != nil {
 		return nil, err
@@ -51,7 +59,7 @@ func (p *planner) RenameIndex(ctx context.Context, n *tree.RenameIndex) (planNod
 			return newZeroNode(nil /* columns */), nil
 		}
 		// Index does not exist, but we want it to: error out.
-		return nil, err
+		return nil, pgerror.WithCandidateCode(err, pgcode.UndefinedObject)
 	}
 
 	if err := p.CheckPrivilege(ctx, tableDesc, privilege.CREATE); err != nil {
@@ -91,14 +99,16 @@ func (n *renameIndexNode) startExec(params runParams) error {
 	}
 
 	if _, _, err := tableDesc.FindIndexByName(string(n.n.NewName)); err == nil {
-		return fmt.Errorf("index name %q already exists", string(n.n.NewName))
+		return pgerror.Newf(pgcode.DuplicateRelation, "index name %q already exists", string(n.n.NewName))
 	}
 
 	if err := tableDesc.RenameIndexDescriptor(idx, string(n.n.NewName)); err != nil {
 		return err
 	}
 
-	if err := tableDesc.Validate(ctx, p.txn, p.ExecCfg().Codec); err != nil {
+	if err := tableDesc.Validate(
+		ctx, catalogkv.NewOneLevelUncachedDescGetter(p.txn, p.ExecCfg().Codec),
+	); err != nil {
 		return err
 	}
 

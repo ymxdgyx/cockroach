@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
 	"github.com/cockroachdb/cockroach/pkg/geo/geos"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -49,16 +48,19 @@ environment variable "COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING" to true.
 `,
 	Example: `  cockroach demo`,
 	Args:    cobra.NoArgs,
-	RunE: MaybeDecorateGRPCError(func(cmd *cobra.Command, _ []string) error {
+	// Note: RunE is set in the init() function below to avoid an
+	// initialization cycle.
+}
+
+func init() {
+	demoCmd.RunE = MaybeDecorateGRPCError(func(cmd *cobra.Command, _ []string) error {
 		return runDemo(cmd, nil /* gen */)
-	}),
+	})
 }
 
 const demoOrg = "Cockroach Demo"
 
 const defaultGeneratorName = "movr"
-
-const defaultRootPassword = "admin"
 
 var defaultGenerator workload.Generator
 
@@ -196,7 +198,7 @@ func checkDemoConfiguration(
 	}
 
 	demoCtx.disableTelemetry = cluster.TelemetryOptOut()
-	// disableLicenseAcquisition can also be set by the the user as an
+	// disableLicenseAcquisition can also be set by the user as an
 	// input flag, so make sure it include it when considering the final
 	// value of disableLicenseAcquisition.
 	demoCtx.disableLicenseAcquisition =
@@ -252,6 +254,12 @@ func checkDemoConfiguration(
 }
 
 func runDemo(cmd *cobra.Command, gen workload.Generator) (err error) {
+	cmdIn, closeFn, err := getInputFile()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+
 	if gen, err = checkDemoConfiguration(cmd, gen); err != nil {
 		return err
 	}
@@ -266,13 +274,9 @@ func runDemo(cmd *cobra.Command, gen workload.Generator) (err error) {
 	}
 	defer c.cleanup(ctx)
 
-	if err := checkTzDatabaseAvailability(ctx); err != nil {
-		return err
-	}
-
 	loc, err := geos.EnsureInit(geos.EnsureInitErrorDisplayPrivate, startCtx.geoLibsDir)
 	if err != nil {
-		log.Infof(ctx, "could not initialize GEOS - geospatial functions may not be available: %v", err)
+		log.Infof(ctx, "could not initialize GEOS - spatial functions may not be available: %v", err)
 	} else {
 		log.Infof(ctx, "GEOS loaded from directory %s", loc)
 	}
@@ -282,7 +286,7 @@ func runDemo(cmd *cobra.Command, gen workload.Generator) (err error) {
 	}
 	demoCtx.transientCluster = &c
 
-	checkInteractive()
+	checkInteractive(cmdIn)
 
 	if cliCtx.isInteractive {
 		fmt.Printf(`#
@@ -331,8 +335,8 @@ func runDemo(cmd *cobra.Command, gen workload.Generator) (err error) {
 		if !demoCtx.insecure {
 			fmt.Printf(
 				"# The user %q with password %q has been created. Use it to access the Web UI!\n#\n",
-				security.RootUser,
-				defaultRootPassword,
+				c.adminUser,
+				c.adminPassword,
 			)
 		}
 		// If we didn't launch a workload, we still need to inform the
@@ -358,7 +362,7 @@ func runDemo(cmd *cobra.Command, gen workload.Generator) (err error) {
 	conn := makeSQLConn(c.connURL)
 	defer conn.Close()
 
-	return runClient(cmd, conn)
+	return runClient(cmd, conn, cmdIn)
 }
 
 func waitForLicense(licenseDone <-chan error) error {

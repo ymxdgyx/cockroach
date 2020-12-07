@@ -94,6 +94,8 @@ func MakeBulkAdder(
 		// splitting _before_ hitting max reduces chance of auto-splitting after the
 		// range is full and is more expensive to split/move.
 		opts.SplitAndScatterAfter = func() int64 { return 48 << 20 }
+	} else if opts.SplitAndScatterAfter() == -1 {
+		opts.SplitAndScatterAfter = nil
 	}
 
 	b := &BufferingAdder{
@@ -128,7 +130,9 @@ func MakeBulkAdder(
 	// it will store in-memory before sending it to RocksDB.
 	b.memAcc = bulkMon.MakeBoundAccount()
 	if err := b.memAcc.Grow(ctx, b.curBufferSize); err != nil {
-		return nil, errors.Wrap(err, "Not enough memory available to create a BulkAdder. Try setting a higher --max-sql-memory.")
+		return nil, errors.WithHint(
+			errors.Wrap(err, "not enough memory available to create a BulkAdder"),
+			"Try setting a higher --max-sql-memory.")
 	}
 
 	return b, nil

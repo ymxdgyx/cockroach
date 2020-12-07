@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -136,6 +137,9 @@ func findLibrary(libraryName string) (string, error) {
 	if local {
 		switch runtime.GOOS {
 		case "linux":
+		case "freebsd":
+		case "openbsd":
+		case "dragonfly":
 		case "windows":
 			suffix = ".dll"
 		case "darwin":
@@ -383,7 +387,7 @@ func execCmdEx(ctx context.Context, l *logger, args ...string) cmdRes {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 
 	debugStdoutBuffer, _ := circbuf.NewBuffer(4096)
-	debugStderrBuffer, _ := circbuf.NewBuffer(1024)
+	debugStderrBuffer, _ := circbuf.NewBuffer(4096)
 
 	// Do a dance around https://github.com/golang/go/issues/23019.
 	// When the command we run launches a subprocess, that subprocess receives
@@ -478,6 +482,15 @@ func execCmdEx(ctx context.Context, l *logger, args ...string) cmdRes {
 	closePipes(ctx)
 	wg.Wait()
 
+	stdoutString := debugStdoutBuffer.String()
+	if debugStdoutBuffer.TotalWritten() > debugStdoutBuffer.Size() {
+		stdoutString = "<... some data truncated by circular buffer; go to artifacts for details ...>\n" + stdoutString
+	}
+	stderrString := debugStderrBuffer.String()
+	if debugStderrBuffer.TotalWritten() > debugStderrBuffer.Size() {
+		stderrString = "<... some data truncated by circular buffer; go to artifacts for details ...>\n" + stderrString
+	}
+
 	if err != nil {
 		// Context errors opaquely appear as "signal killed" when manifested.
 		// We surface this error explicitly.
@@ -489,16 +502,16 @@ func execCmdEx(ctx context.Context, l *logger, args ...string) cmdRes {
 			err = &withCommandDetails{
 				cause:  err,
 				cmd:    strings.Join(args, " "),
-				stderr: debugStderrBuffer.String(),
-				stdout: debugStdoutBuffer.String(),
+				stderr: stderrString,
+				stdout: stdoutString,
 			}
 		}
 	}
 
 	return cmdRes{
 		err:    err,
-		stdout: debugStdoutBuffer.String(),
-		stderr: debugStderrBuffer.String(),
+		stdout: stdoutString,
+		stderr: stderrString,
 	}
 }
 
@@ -862,16 +875,9 @@ func (s *clusterSpec) args() []string {
 
 	switch cloud {
 	case aws:
-		if s.Zones != "" {
-			fmt.Fprintf(os.Stderr, "zones spec not yet supported on AWS: %s\n", s.Zones)
-			os.Exit(1)
-		}
-		if s.Geo {
-			fmt.Fprintf(os.Stderr, "geo-distributed clusters not yet supported on AWS\n")
-			os.Exit(1)
-		}
-
 		args = append(args, "--clouds=aws")
+	case gce:
+		args = append(args, "--clouds=gce")
 	case azure:
 		args = append(args, "--clouds=azure")
 	}
@@ -1258,6 +1264,9 @@ func (f *clusterFactory) newCluster(
 	// Attempt to create a cluster several times, cause them clouds be flaky that
 	// my phone says it's snowing.
 	for i := 0; i < 3; i++ {
+		if i > 0 {
+			l.PrintfCtx(ctx, "Retrying cluster creation (attempt #%d)", i+1)
+		}
 		err = execCmd(ctx, l, sargs...)
 		if err == nil {
 			success = true
@@ -1488,12 +1497,28 @@ func (c *cluster) FetchLogs(ctx context.Context) error {
 
 	// Don't hang forever if we can't fetch the logs.
 	return contextutil.RunWithTimeout(ctx, "fetch logs", 2*time.Minute, func(ctx context.Context) error {
-		path := filepath.Join(c.t.ArtifactsDir(), "logs")
+		path := filepath.Join(c.t.ArtifactsDir(), "logs", "unredacted")
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
 
-		return execCmd(ctx, c.l, roachprod, "get", c.name, "logs" /* src */, path /* dest */)
+		if err := execCmd(ctx, c.l, roachprod, "get", c.name, "logs" /* src */, path /* dest */); err != nil {
+			log.Infof(ctx, "failed to fetch logs: %v", err)
+			if ctx.Err() != nil {
+				return err
+			}
+		}
+
+		if err := c.RunE(ctx, c.All(), "mkdir -p logs/redacted && ./cockroach debug merge-logs --redact logs/*.log > logs/redacted/combined.log"); err != nil {
+			log.Infof(ctx, "failed to redact logs: %v", err)
+			if ctx.Err() != nil {
+				return err
+			}
+		}
+
+		return execCmd(
+			ctx, c.l, roachprod, "get", c.name, "logs/redacted/combined.log" /* src */, filepath.Join(c.t.ArtifactsDir(), "logs/cockroach.log"),
+		)
 	})
 }
 
@@ -1940,6 +1965,28 @@ func (c *cluster) PutLibraries(ctx context.Context, libraryDir string) error {
 		); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// Stage stages a binary to the cluster.
+func (c *cluster) Stage(
+	ctx context.Context, l *logger, application, versionOrSHA, dir string, opts ...option,
+) error {
+	if ctx.Err() != nil {
+		return errors.Wrap(ctx.Err(), "cluster.Stage")
+	}
+
+	c.status("staging binary")
+	defer c.status("")
+
+	args := []string{roachprod, "stage", c.makeNodes(opts...), application, versionOrSHA}
+	if dir != "" {
+		args = append(args, fmt.Sprintf("--dir='%s'", dir))
+	}
+	err := execCmd(ctx, c.l, args...)
+	if err != nil {
+		return errors.Wrap(err, "cluster.Stage")
 	}
 	return nil
 }
@@ -2483,8 +2530,12 @@ func getDiskUsageInBytes(
 		// TODO(bdarnell): Refactor this stack to not combine stdout and
 		// stderr so we don't need to do this (and the Warning check
 		// below).
-		out, err = c.RunWithBuffer(ctx, logger, c.Node(nodeIdx),
-			fmt.Sprint("du -sk {store-dir} 2>/dev/null | grep -oE '^[0-9]+'"))
+		out, err = c.RunWithBuffer(
+			ctx,
+			logger,
+			c.Node(nodeIdx),
+			"du -sk {store-dir} 2>/dev/null | grep -oE '^[0-9]+'",
+		)
 		if err != nil {
 			if ctx.Err() != nil {
 				return 0, ctx.Err()
@@ -2707,8 +2758,10 @@ func (m *monitor) wait(args ...string) error {
 	return err
 }
 
+// TODO(nvanbenschoten): this function should take a context and be responsive
+// to context cancellation.
 func waitForFullReplication(t *test, db *gosql.DB) {
-	t.l.Printf("waiting for up-replication...\n")
+	t.l.Printf("waiting for up-replication...")
 	tStart := timeutil.Now()
 	for ok := false; !ok; time.Sleep(time.Second) {
 		if err := db.QueryRow(
@@ -2718,6 +2771,45 @@ func waitForFullReplication(t *test, db *gosql.DB) {
 		}
 		if timeutil.Since(tStart) > 30*time.Second {
 			t.l.Printf("still waiting for full replication")
+		}
+	}
+}
+
+func waitForUpdatedReplicationReport(ctx context.Context, t *test, db *gosql.DB) {
+	t.l.Printf("waiting for updated replication report...")
+
+	// Temporarily drop the replication report interval down.
+	if _, err := db.ExecContext(
+		ctx, `SET CLUSTER setting kv.replication_reports.interval = '2s'`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := db.ExecContext(
+			ctx, `RESET CLUSTER setting kv.replication_reports.interval`,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	// Wait for a new report with a timestamp after tStart to ensure
+	// that the report picks up any new tables or zones.
+	tStart := timeutil.Now()
+	for r := retry.StartWithCtx(ctx, retry.Options{}); r.Next(); {
+		var gen time.Time
+		if err := db.QueryRowContext(
+			ctx, `SELECT generated FROM system.reports_meta ORDER BY 1 DESC LIMIT 1`,
+		).Scan(&gen); err != nil {
+			if !errors.Is(err, gosql.ErrNoRows) {
+				t.Fatal(err)
+			}
+			// No report generated yet.
+		} else if tStart.Before(gen) {
+			// New report generated.
+			return
+		}
+		if timeutil.Since(tStart) > 30*time.Second {
+			t.l.Printf("still waiting for updated replication report")
 		}
 	}
 }

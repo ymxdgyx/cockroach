@@ -34,6 +34,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var _ roachpb.InternalServer = Node(0)
+
 type Node time.Duration
 
 func (n Node) Batch(
@@ -58,6 +60,16 @@ func (n Node) RangeFeed(_ *roachpb.RangeFeedRequest, _ roachpb.Internal_RangeFee
 func (n Node) GossipSubscription(
 	_ *roachpb.GossipSubscriptionRequest, _ roachpb.Internal_GossipSubscriptionServer,
 ) error {
+	panic("unimplemented")
+}
+
+func (n Node) Join(context.Context, *roachpb.JoinNodeRequest) (*roachpb.JoinNodeResponse, error) {
+	panic("unimplemented")
+}
+
+func (n Node) ResetQuorum(
+	context.Context, *roachpb.ResetQuorumRequest,
+) (*roachpb.ResetQuorumResponse, error) {
 	panic("unimplemented")
 }
 
@@ -107,6 +119,8 @@ type firstNErrorTransport struct {
 func (f *firstNErrorTransport) IsExhausted() bool {
 	return f.numSent >= len(f.replicas)
 }
+
+func (f *firstNErrorTransport) Release() {}
 
 func (f *firstNErrorTransport) SendNext(
 	_ context.Context, _ roachpb.BatchRequest,
@@ -256,10 +270,14 @@ func TestSplitHealthy(t *testing.T) {
 	for _, td := range testData {
 		t.Run("", func(t *testing.T) {
 			replicas := make([]roachpb.ReplicaDescriptor, len(td.in))
-			health := make(map[roachpb.ReplicaDescriptor]bool)
+			var health util.FastIntMap
 			for i, r := range td.in {
 				replicas[i] = r.replica
-				health[replicas[i]] = r.healthy
+				if r.healthy {
+					health.Set(i, healthHealthy)
+				} else {
+					health.Set(i, healthUnhealthy)
+				}
 			}
 			splitHealthy(replicas, health)
 			if !reflect.DeepEqual(replicas, td.out) {

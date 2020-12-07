@@ -55,11 +55,6 @@ func (c *CustomFuncs) HasColType(scalar opt.ScalarExpr, dstTyp *types.T) bool {
 	return scalar.DataType().Identical(dstTyp)
 }
 
-// IsString returns true if the given scalar expression is of type String.
-func (c *CustomFuncs) IsString(scalar opt.ScalarExpr) bool {
-	return scalar.DataType().Family() == types.StringFamily
-}
-
 // IsTimestamp returns true if the given scalar expression is of type Timestamp.
 func (c *CustomFuncs) IsTimestamp(scalar opt.ScalarExpr) bool {
 	return scalar.DataType().Family() == types.TimestampFamily
@@ -137,6 +132,12 @@ func (c *CustomFuncs) IsConstJSON(expr opt.ScalarExpr) bool {
 	return false
 }
 
+// IsFloatDatum returns true if the given tree.Datum is a DFloat.
+func (c *CustomFuncs) IsFloatDatum(datum tree.Datum) bool {
+	_, ok := datum.(*tree.DFloat)
+	return ok
+}
+
 // ----------------------------------------------------------------------
 //
 // Column functions
@@ -159,6 +160,22 @@ func (c *CustomFuncs) OutputCols2(left, right memo.RelExpr) opt.ColSet {
 // are guaranteed to never be NULL.
 func (c *CustomFuncs) NotNullCols(input memo.RelExpr) opt.ColSet {
 	return input.Relational().NotNullCols
+}
+
+// SingleRegressionCountArgument checks if either arg is non-null and returns
+// the other one (or nil if neither is non-null).
+func (c *CustomFuncs) SingleRegressionCountArgument(
+	y, x opt.ScalarExpr, input memo.RelExpr,
+) opt.ScalarExpr {
+	notNullCols := c.NotNullCols(input)
+	if c.ExprIsNeverNull(y, notNullCols) {
+		return x
+	}
+	if c.ExprIsNeverNull(x, notNullCols) {
+		return y
+	}
+
+	return nil
 }
 
 // IsColNotNull returns true if the given input column is never null.
@@ -1014,6 +1031,11 @@ func (c *CustomFuncs) IntConst(d *tree.DInt) opt.ScalarExpr {
 // second.
 func (c *CustomFuncs) IsGreaterThan(first, second tree.Datum) bool {
 	return first.Compare(c.f.evalCtx, second) == 1
+}
+
+// DatumsEqual returns true if the first datum compares as equal to the second.
+func (c *CustomFuncs) DatumsEqual(first, second tree.Datum) bool {
+	return first.Compare(c.f.evalCtx, second) == 0
 }
 
 // ----------------------------------------------------------------------

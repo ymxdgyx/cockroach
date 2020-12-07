@@ -260,14 +260,7 @@ func NewMergeJoinOp(
 	actualRightOrdering := make([]execinfrapb.Ordering_Column, len(rightOrdering))
 	copy(actualLeftOrdering, leftOrdering)
 	copy(actualRightOrdering, rightOrdering)
-	isNumeric := func(t *types.T) bool {
-		switch t.Family() {
-		case types.IntFamily, types.FloatFamily, types.DecimalFamily:
-			return true
-		default:
-			return false
-		}
-	}
+
 	// Iterate over each equality column and check whether a cast is needed. If
 	// it is needed for some column, then a cast operator is planned on top of
 	// the input from the corresponding side and the types and ordering are
@@ -280,7 +273,7 @@ func NewMergeJoinOp(
 		rightColIdx := rightOrdering[i].ColIdx
 		leftType := leftTypes[leftColIdx]
 		rightType := rightTypes[rightColIdx]
-		if !leftType.Identical(rightType) && isNumeric(leftType) && isNumeric(rightType) {
+		if !leftType.Identical(rightType) && leftType.IsNumeric() && rightType.IsNumeric() {
 			// The types are different and both are numeric, so we need to plan
 			// a cast. There is a hierarchy of valid casts:
 			//   INT2 -> INT4 -> INT8 -> FLOAT -> DECIMAL
@@ -339,8 +332,12 @@ func NewMergeJoinOp(
 		mergeJoinerOp = &mergeJoinFullOuterOp{base}
 	case descpb.LeftSemiJoin:
 		mergeJoinerOp = &mergeJoinLeftSemiOp{base}
+	case descpb.RightSemiJoin:
+		mergeJoinerOp = &mergeJoinRightSemiOp{base}
 	case descpb.LeftAntiJoin:
 		mergeJoinerOp = &mergeJoinLeftAntiOp{base}
+	case descpb.RightAntiJoin:
+		mergeJoinerOp = &mergeJoinRightAntiOp{base}
 	case descpb.IntersectAllJoin:
 		mergeJoinerOp = &mergeJoinIntersectAllOp{base}
 	case descpb.ExceptAllJoin:
@@ -356,24 +353,32 @@ func NewMergeJoinOp(
 	// We need to add a projection to remove all the cast columns we have added
 	// above. Note that all extra columns were appended to the corresponding
 	// types slices, so we simply need to include first len(leftTypes) from the
-	// left and first len(rightTypes) from the right (the latter are included
-	// depending on the join type).
+	// left and first len(rightTypes) from the right (paying attention to the
+	// join type).
+	numLeftTypes := len(leftTypes)
 	numRightTypes := len(rightTypes)
+	numActualLeftTypes := len(actualLeftTypes)
+	numActualRightTypes := len(actualRightTypes)
+	if !joinType.ShouldIncludeLeftColsInOutput() {
+		numLeftTypes = 0
+		numActualLeftTypes = 0
+	}
 	if !joinType.ShouldIncludeRightColsInOutput() {
 		numRightTypes = 0
+		numActualRightTypes = 0
 	}
-	projection := make([]uint32, 0, len(leftTypes)+numRightTypes)
-	for i := range leftTypes {
+	projection := make([]uint32, 0, numLeftTypes+numRightTypes)
+	for i := 0; i < numLeftTypes; i++ {
 		projection = append(projection, uint32(i))
 	}
 	for i := 0; i < numRightTypes; i++ {
 		// Merge joiner outputs all columns from both sides, and the columns
-		// from the right have indices in [len(actualLeftTypes),
-		// len(actualLeftTypes) + len(actualRightColumns)) range.
-		projection = append(projection, uint32(len(actualLeftTypes)+i))
+		// from the right have indices in [numActualLeftTypes,
+		// numActualLeftTypes + numActualRightTypes) range.
+		projection = append(projection, uint32(numActualLeftTypes+i))
 	}
 	return NewSimpleProjectOp(
-		mergeJoinerOp, len(actualLeftTypes)+len(actualRightTypes), projection,
+		mergeJoinerOp, numActualLeftTypes+numActualRightTypes, projection,
 	).(ResettableOperator), nil
 }
 
@@ -505,7 +510,7 @@ type mergeJoinBase struct {
 }
 
 var _ resetter = &mergeJoinBase{}
-var _ Closer = &mergeJoinBase{}
+var _ colexecbase.Closer = &mergeJoinBase{}
 
 func (o *mergeJoinBase) reset(ctx context.Context) {
 	if r, ok := o.left.source.(resetter); ok {
@@ -525,13 +530,10 @@ func (o *mergeJoinBase) reset(ctx context.Context) {
 	o.resetBuilderCrossProductState()
 }
 
-func (o *mergeJoinBase) InternalMemoryUsage() int {
-	const sizeOfGroup = int(unsafe.Sizeof(group{}))
-	return 8 * coldata.BatchSize() * sizeOfGroup // o.groups
-}
-
 func (o *mergeJoinBase) Init() {
-	o.outputTypes = append([]*types.T{}, o.left.sourceTypes...)
+	if o.joinType.ShouldIncludeLeftColsInOutput() {
+		o.outputTypes = append(o.outputTypes, o.left.sourceTypes...)
+	}
 	if o.joinType.ShouldIncludeRightColsInOutput() {
 		o.outputTypes = append(o.outputTypes, o.right.sourceTypes...)
 	}
@@ -555,6 +557,8 @@ func (o *mergeJoinBase) Init() {
 	o.builderState.lGroups = make([]group, 1)
 	o.builderState.rGroups = make([]group, 1)
 
+	const sizeOfGroup = int(unsafe.Sizeof(group{}))
+	o.unlimitedAllocator.AdjustMemoryUsage(int64(8 * coldata.BatchSize() * sizeOfGroup))
 	o.groups = makeGroupsBuffer(coldata.BatchSize())
 	o.resetBuilderCrossProductState()
 }
@@ -777,7 +781,7 @@ func (o *mergeJoinBase) Close(ctx context.Context) error {
 	}
 	var lastErr error
 	for _, op := range []colexecbase.Operator{o.left.source, o.right.source} {
-		if c, ok := op.(Closer); ok {
+		if c, ok := op.(colexecbase.Closer); ok {
 			if err := c.Close(ctx); err != nil {
 				lastErr = err
 			}

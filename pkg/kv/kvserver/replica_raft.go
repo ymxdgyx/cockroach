@@ -22,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -35,9 +36,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"go.etcd.io/etcd/raft"
-	"go.etcd.io/etcd/raft/raftpb"
-	"go.etcd.io/etcd/raft/tracker"
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/raftpb"
+	"go.etcd.io/etcd/raft/v3/tracker"
 )
 
 func makeIDKey() kvserverbase.CmdIDKey {
@@ -263,12 +264,12 @@ func (r *Replica) propose(ctx context.Context, p *ProposalData) (index int64, pE
 		replID := r.ReplicaID()
 		for _, rDesc := range crt.Removed() {
 			if rDesc.ReplicaID == replID {
-				msg := fmt.Sprintf("received invalid ChangeReplicasTrigger %s to remove self (leaseholder)", crt)
-				log.Errorf(p.ctx, "%v", msg)
-				return 0, roachpb.NewErrorf("%s: %s", r, msg)
+				err := errors.Mark(errors.Newf("received invalid ChangeReplicasTrigger %s to remove self (leaseholder)", crt),
+					errMarkInvalidReplicationChange)
+				log.Errorf(p.ctx, "%v", err)
+				return 0, roachpb.NewError(err)
 			}
 		}
-
 	} else if p.command.ReplicatedEvalResult.AddSSTable != nil {
 		log.VEvent(p.ctx, 4, "sideloadable proposal detected")
 		version = raftVersionSideloaded
@@ -328,7 +329,7 @@ func (r *Replica) propose(ctx context.Context, p *ProposalData) (index int64, pE
 	//
 	// NB: we must not hold r.mu while using the proposal buffer, see comment
 	// on the field.
-	maxLeaseIndex, err := r.mu.proposalBuf.Insert(p, data)
+	maxLeaseIndex, err := r.mu.proposalBuf.Insert(ctx, p, data)
 	if err != nil {
 		return 0, roachpb.NewError(err)
 	}
@@ -399,6 +400,17 @@ func (r *Replica) stepRaftGroup(req *RaftMessageRequest) error {
 	})
 }
 
+// raftSchedulerCtx annotates a given Raft scheduler context with information
+// about the replica. The method may return a cached instance of this context.
+func (r *Replica) raftSchedulerCtx(schedulerCtx context.Context) context.Context {
+	if v := r.schedulerCtx.Load(); v != nil {
+		return v.(context.Context)
+	}
+	schedulerCtx = r.AnnotateCtx(schedulerCtx)
+	r.schedulerCtx.Store(schedulerCtx)
+	return schedulerCtx
+}
+
 type handleRaftReadyStats struct {
 	applyCommittedEntriesStats
 }
@@ -416,10 +428,6 @@ var noSnap IncomingSnapshot
 func (r *Replica) handleRaftReady(
 	ctx context.Context, inSnap IncomingSnapshot,
 ) (handleRaftReadyStats, string, error) {
-	defer func(start time.Time) {
-		elapsed := timeutil.Since(start)
-		r.store.metrics.RaftHandleReadyLatency.RecordValue(elapsed.Nanoseconds())
-	}(timeutil.Now())
 	r.raftMu.Lock()
 	defer r.raftMu.Unlock()
 	return r.handleRaftReadyRaftMuLocked(ctx, inSnap)
@@ -444,7 +452,7 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	leaderID := r.mu.leaderID
 	lastLeaderID := leaderID
 	err := r.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
-		numFlushed, err := r.mu.proposalBuf.FlushLockedWithRaftGroup(raftGroup)
+		numFlushed, err := r.mu.proposalBuf.FlushLockedWithRaftGroup(ctx, raftGroup)
 		if err != nil {
 			return false, err
 		}
@@ -876,9 +884,7 @@ func maybeFatalOnRaftReadyErr(ctx context.Context, expl string, err error) (remo
 
 // tick the Raft group, returning true if the raft group exists and is
 // unquiesced; false otherwise.
-func (r *Replica) tick(livenessMap IsLiveMap) (bool, error) {
-	ctx := r.AnnotateCtx(context.TODO())
-
+func (r *Replica) tick(ctx context.Context, livenessMap liveness.IsLiveMap) (bool, error) {
 	r.unreachablesMu.Lock()
 	remotes := r.unreachablesMu.remotes
 	r.unreachablesMu.remotes = nil
@@ -905,7 +911,7 @@ func (r *Replica) tick(livenessMap IsLiveMap) (bool, error) {
 		return false, nil
 	}
 
-	r.maybeTransferRaftLeadershipLocked(ctx)
+	r.maybeTransferRaftLeadershipToLeaseholderLocked(ctx)
 
 	// For followers, we update lastUpdateTimes when we step a message from them
 	// into the local Raft group. The leader won't hit that path, so we update
@@ -995,9 +1001,13 @@ func (r *Replica) refreshProposalsLocked(
 			if p.command.MaxLeaseIndex <= r.mu.state.LeaseAppliedIndex {
 				r.cleanupFailedProposalLocked(p)
 				log.Eventf(p.ctx, "retry proposal %x: %s", p.idKey, reason)
-				p.finishApplication(ctx, proposalResult{Err: roachpb.NewError(
-					roachpb.NewAmbiguousResultError(
-						fmt.Sprintf("unable to determine whether command was applied via snapshot")))})
+				p.finishApplication(ctx, proposalResult{
+					Err: roachpb.NewError(
+						roachpb.NewAmbiguousResultError(
+							"unable to determine whether command was applied via snapshot",
+						),
+					),
+				})
 			}
 			continue
 
@@ -1030,7 +1040,7 @@ func (r *Replica) refreshProposalsLocked(
 	sort.Sort(reproposals)
 	for _, p := range reproposals {
 		log.Eventf(p.ctx, "re-submitting command %x to Raft: %s", p.idKey, reason)
-		if err := r.mu.proposalBuf.ReinsertLocked(p); err != nil {
+		if err := r.mu.proposalBuf.ReinsertLocked(ctx, p); err != nil {
 			r.cleanupFailedProposalLocked(p)
 			p.finishApplication(ctx, proposalResult{
 				Err: roachpb.NewError(roachpb.NewAmbiguousResultError(err.Error())),
@@ -1046,6 +1056,7 @@ func (r *Replica) maybeCoalesceHeartbeat(
 	msg raftpb.Message,
 	toReplica, fromReplica roachpb.ReplicaDescriptor,
 	quiesce bool,
+	lagging laggingReplicaSet,
 ) bool {
 	var hbMap map[roachpb.StoreIdent][]RaftHeartbeat
 	switch msg.Type {
@@ -1059,12 +1070,14 @@ func (r *Replica) maybeCoalesceHeartbeat(
 		return false
 	}
 	beat := RaftHeartbeat{
-		RangeID:       r.RangeID,
-		ToReplicaID:   toReplica.ReplicaID,
-		FromReplicaID: fromReplica.ReplicaID,
-		Term:          msg.Term,
-		Commit:        msg.Commit,
-		Quiesce:       quiesce,
+		RangeID:                           r.RangeID,
+		ToReplicaID:                       toReplica.ReplicaID,
+		FromReplicaID:                     fromReplica.ReplicaID,
+		Term:                              msg.Term,
+		Commit:                            msg.Commit,
+		Quiesce:                           quiesce,
+		LaggingFollowersOnQuiesce:         lagging,
+		LaggingFollowersOnQuiesceAccurate: quiesce,
 	}
 	if log.V(4) {
 		log.Infof(ctx, "coalescing beat: %+v", beat)
@@ -1171,7 +1184,7 @@ func (r *Replica) sendRaftMessage(ctx context.Context, msg raftpb.Message) {
 		return
 	}
 
-	if r.maybeCoalesceHeartbeat(ctx, msg, toReplica, fromReplica, false) {
+	if r.maybeCoalesceHeartbeat(ctx, msg, toReplica, fromReplica, false, nil) {
 		return
 	}
 
@@ -1564,17 +1577,6 @@ func (r *Replica) maybeAcquireSnapshotMergeLock(
 		subsumedRepls = append(subsumedRepls, sRepl)
 		endKey = sRepl.Desc().EndKey
 	}
-	// TODO(benesch): we may be unnecessarily forcing another Raft snapshot here
-	// by subsuming too much. Consider the case where [a, b) and [c, e) first
-	// merged into [a, e), then split into [a, d) and [d, e), and we're applying a
-	// snapshot that spans this merge and split. The bounds of this snapshot will
-	// be [a, d), so we'll subsume [c, e). But we're still a member of [d, e)!
-	// We'll currently be forced to get a Raft snapshot to catch up. Ideally, we'd
-	// subsume only half of [c, e) and synthesize a new RHS [d, e), effectively
-	// applying both the split and merge during snapshot application. This isn't a
-	// huge deal, though: we're probably behind enough that the RHS would need to
-	// get caught up with a Raft snapshot anyway, even if we synthesized it
-	// properly.
 	return subsumedRepls, func() {
 		for _, sr := range subsumedRepls {
 			sr.raftMu.Unlock()
@@ -1701,7 +1703,7 @@ func handleTruncatedStateBelowRaft(
 		// NB: RangeIDPrefixBufs have sufficient capacity (32 bytes) to
 		// avoid allocating when constructing Raft log keys (16 bytes).
 		unsafeKey := prefixBuf.RaftLogKey(idx)
-		if err := readWriter.Clear(storage.MakeMVCCMetadataKey(unsafeKey)); err != nil {
+		if err := readWriter.ClearUnversioned(unsafeKey); err != nil {
 			return false, errors.Wrapf(err, "unable to clear truncated Raft entries for %+v", newTruncatedState)
 		}
 	}
@@ -1747,7 +1749,7 @@ func ComputeRaftLogSize(
 ) (int64, error) {
 	prefix := keys.RaftLogPrefix(rangeID)
 	prefixEnd := prefix.PrefixEnd()
-	iter := reader.NewIterator(storage.IterOptions{
+	iter := reader.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{
 		LowerBound: prefix,
 		UpperBound: prefixEnd,
 	})

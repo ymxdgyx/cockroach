@@ -18,10 +18,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
@@ -33,33 +35,47 @@ import (
 // NewLogicalAccessor constructs a new accessor given an underlying physical
 // accessor and VirtualSchemas.
 func NewLogicalAccessor(
-	physicalAccessor catalog.Accessor, vs catalog.VirtualSchemas,
+	descsCol *descs.Collection, vs catalog.VirtualSchemas,
 ) *LogicalSchemaAccessor {
 	return &LogicalSchemaAccessor{
-		Accessor: physicalAccessor,
-		vs:       vs,
+		tc: descsCol,
+		vs: vs,
 	}
 }
 
 // LogicalSchemaAccessor extends an existing DatabaseLister with the
 // ability to list tables in a virtual schema.
 type LogicalSchemaAccessor struct {
-	catalog.Accessor
+	tc *descs.Collection
 	vs catalog.VirtualSchemas
 }
 
-var _ catalog.Accessor = &LogicalSchemaAccessor{}
+// GetDatabaseDesc implements the Accessor interface.
+func (l *LogicalSchemaAccessor) GetDatabaseDesc(
+	ctx context.Context,
+	txn *kv.Txn,
+	codec keys.SQLCodec,
+	name string,
+	flags tree.DatabaseLookupFlags,
+) (desc catalog.DatabaseDescriptor, err error) {
+	return l.tc.GetDatabaseByName(ctx, txn, name, flags)
+}
 
 // GetSchema implements the Accessor interface.
 func (l *LogicalSchemaAccessor) GetSchema(
-	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, dbID descpb.ID, scName string,
-) (bool, sqlbase.ResolvedSchema, error) {
+	ctx context.Context,
+	txn *kv.Txn,
+	codec keys.SQLCodec,
+	dbID descpb.ID,
+	scName string,
+	flags tree.SchemaLookupFlags,
+) (bool, catalog.ResolvedSchema, error) {
 	if _, ok := l.vs.GetVirtualSchema(scName); ok {
-		return true, sqlbase.ResolvedSchema{Kind: sqlbase.SchemaVirtual}, nil
+		return true, catalog.ResolvedSchema{Kind: catalog.SchemaVirtual, Name: scName}, nil
 	}
 
 	// Fallthrough.
-	return l.Accessor.GetSchema(ctx, txn, codec, dbID, scName)
+	return l.tc.GetSchemaByName(ctx, txn, dbID, scName, flags)
 }
 
 // GetObjectNames implements the DatabaseLister interface.
@@ -67,7 +83,7 @@ func (l *LogicalSchemaAccessor) GetObjectNames(
 	ctx context.Context,
 	txn *kv.Txn,
 	codec keys.SQLCodec,
-	dbDesc sqlbase.DatabaseDescriptor,
+	dbDesc catalog.DatabaseDescriptor,
 	scName string,
 	flags tree.DatabaseListFlags,
 ) (tree.TableNames, error) {
@@ -85,7 +101,7 @@ func (l *LogicalSchemaAccessor) GetObjectNames(
 	}
 
 	// Fallthrough.
-	return l.Accessor.GetObjectNames(ctx, txn, codec, dbDesc, scName, flags)
+	return l.tc.GetObjectNames(ctx, txn, dbDesc, scName, flags)
 }
 
 // GetObjectDesc implements the ObjectAccessor interface.
@@ -105,7 +121,7 @@ func (l *LogicalSchemaAccessor) GetObjectDesc(
 		if desc == nil {
 			if flags.Required {
 				obj := tree.NewQualifiedObjectName(db, schema, object, flags.DesiredObjectKind)
-				return nil, sqlbase.NewUndefinedObjectError(obj, flags.DesiredObjectKind)
+				return nil, sqlerrors.NewUndefinedObjectError(obj, flags.DesiredObjectKind)
 			}
 			return nil, nil
 		}
@@ -122,12 +138,21 @@ func (l *LogicalSchemaAccessor) GetObjectDesc(
 			if flags.RequireMutable {
 				return nil, errors.Newf("cannot use mutable descriptor of aliased type %s.%s", schema, object)
 			}
-			return sqlbase.MakeSimpleAliasTypeDescriptor(alias), nil
+			return typedesc.MakeSimpleAlias(alias, keys.PublicSchemaID), nil
 		}
 	}
 
-	// Fallthrough.
-	return l.Accessor.GetObjectDesc(ctx, txn, settings, codec, db, schema, object, flags)
+	// Fall back to physical descriptor access.
+	switch flags.DesiredObjectKind {
+	case tree.TypeObject:
+		typeName := tree.MakeNewQualifiedTypeName(db, schema, object)
+		return l.tc.GetTypeByName(ctx, txn, &typeName, flags)
+	case tree.TableObject:
+		tableName := tree.MakeTableNameWithSchema(tree.Name(db), tree.Name(schema), tree.Name(object))
+		return l.tc.GetTableByName(ctx, txn, &tableName, flags)
+	default:
+		return nil, errors.AssertionFailedf("unknown desired object kind %d", flags.DesiredObjectKind)
+	}
 }
 
 func newMutableAccessToVirtualSchemaError(entry catalog.VirtualSchema, object string) error {

@@ -15,9 +15,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 )
@@ -28,10 +29,10 @@ import (
 // ColIDtoRowIndexFromCols groups a slice of ColumnDescriptors by their ID
 // field, returning a map from ID to the index of the column in the input slice.
 // It assumes there are no duplicate descriptors in the input.
-func ColIDtoRowIndexFromCols(cols []descpb.ColumnDescriptor) map[descpb.ColumnID]int {
-	colIDtoRowIndex := make(map[descpb.ColumnID]int, len(cols))
+func ColIDtoRowIndexFromCols(cols []descpb.ColumnDescriptor) catalog.TableColMap {
+	var colIDtoRowIndex catalog.TableColMap
 	for i := range cols {
-		colIDtoRowIndex[cols[i].ID] = i
+		colIDtoRowIndex.Set(cols[i].ID, i)
 	}
 	return colIDtoRowIndex
 }
@@ -95,20 +96,21 @@ func prepareInsertOrUpdateBatch(
 	primaryIndexKey []byte,
 	fetchedCols []descpb.ColumnDescriptor,
 	values []tree.Datum,
-	valColIDMapping map[descpb.ColumnID]int,
+	valColIDMapping catalog.TableColMap,
 	marshaledValues []roachpb.Value,
-	marshaledColIDMapping map[descpb.ColumnID]int,
+	marshaledColIDMapping catalog.TableColMap,
 	kvKey *roachpb.Key,
 	kvValue *roachpb.Value,
 	rawValueBuf []byte,
 	putFn func(ctx context.Context, b putter, key *roachpb.Key, value *roachpb.Value, traceKV bool),
 	overwrite, traceKV bool,
 ) ([]byte, error) {
-	for i := range helper.TableDesc.Families {
-		family := &helper.TableDesc.Families[i]
+	families := helper.TableDesc.GetFamilies()
+	for i := range families {
+		family := &families[i]
 		update := false
 		for _, colID := range family.ColumnIDs {
-			if _, ok := marshaledColIDMapping[colID]; ok {
+			if _, ok := marshaledColIDMapping.Get(colID); ok {
 				update = true
 				break
 			}
@@ -137,7 +139,7 @@ func prepareInsertOrUpdateBatch(
 			// Storage optimization to store DefaultColumnID directly as a value. Also
 			// backwards compatible with the original BaseFormatVersion.
 
-			idx, ok := marshaledColIDMapping[family.DefaultColumnID]
+			idx, ok := marshaledColIDMapping.Get(family.DefaultColumnID)
 			if !ok {
 				continue
 			}
@@ -166,13 +168,13 @@ func prepareInsertOrUpdateBatch(
 			return nil, errors.AssertionFailedf("invalid family sorted column id map")
 		}
 		for _, colID := range familySortedColumnIDs {
-			idx, ok := valColIDMapping[colID]
+			idx, ok := valColIDMapping.Get(colID)
 			if !ok || values[idx] == tree.DNull {
 				// Column not being updated or inserted.
 				continue
 			}
 
-			if skip, err := helper.skipColumnInPK(colID, family.ID, values[idx]); err != nil {
+			if skip, err := helper.skipColumnInPK(colID, values[idx]); err != nil {
 				return nil, err
 			} else if skip {
 				continue
@@ -185,7 +187,7 @@ func prepareInsertOrUpdateBatch(
 			colIDDiff := col.ID - lastColID
 			lastColID = col.ID
 			var err error
-			rawValueBuf, err = sqlbase.EncodeTableValue(rawValueBuf, colIDDiff, values[idx], nil)
+			rawValueBuf, err = rowenc.EncodeTableValue(rawValueBuf, colIDDiff, values[idx], nil)
 			if err != nil {
 				return nil, err
 			}

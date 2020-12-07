@@ -25,7 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/metric/aggmetric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 var (
@@ -398,6 +398,20 @@ var (
 		Unit:        metric.Unit_BYTES,
 	}
 
+	// Disk health metrics.
+	metaDiskSlow = metric.Metadata{
+		Name:        "storage.disk-slow",
+		Help:        "Number of instances of disk operations taking longer than 10s",
+		Measurement: "Events",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaDiskStalled = metric.Metadata{
+		Name:        "storage.disk-stalled",
+		Help:        "Number of instances of disk operations taking longer than 30s",
+		Measurement: "Events",
+		Unit:        metric.Unit_COUNT,
+	}
+
 	// Range event metrics.
 	metaRangeSplits = metric.Metadata{
 		Name:        "range.splits",
@@ -429,15 +443,21 @@ var (
 		Measurement: "Snapshots",
 		Unit:        metric.Unit_COUNT,
 	}
-	metaRangeSnapshotsNormalApplied = metric.Metadata{
-		Name:        "range.snapshots.normal-applied",
-		Help:        "Number of applied snapshots",
+	metaRangeSnapshotsAppliedByVoters = metric.Metadata{
+		Name:        "range.snapshots.applied-voter",
+		Help:        "Number of snapshots applied by voter replicas",
 		Measurement: "Snapshots",
 		Unit:        metric.Unit_COUNT,
 	}
-	metaRangeSnapshotsLearnerApplied = metric.Metadata{
-		Name:        "range.snapshots.learner-applied",
-		Help:        "Number of applied learner snapshots",
+	metaRangeSnapshotsAppliedForInitialUpreplication = metric.Metadata{
+		Name:        "range.snapshots.applied-initial",
+		Help:        "Number of snapshots applied for initial upreplication",
+		Measurement: "Snapshots",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaRangeSnapshotsAppliedByNonVoter = metric.Metadata{
+		Name:        "range.snapshots.applied-non-voter",
+		Help:        "Number of snapshots applied by non-voter replicas",
 		Measurement: "Snapshots",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -494,6 +514,12 @@ var (
 	metaRaftApplyCommittedLatency = metric.Metadata{
 		Name:        "raft.process.applycommitted.latency",
 		Help:        "Latency histogram for applying all committed Raft commands in a Raft ready",
+		Measurement: "Latency",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaRaftSchedulerLatency = metric.Metadata{
+		Name:        "raft.scheduler.latency",
+		Help:        "Nanoseconds spent waiting for a range to be processed by the Raft scheduler",
 		Measurement: "Latency",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
@@ -1002,6 +1028,12 @@ var (
 		Measurement: "Nanoseconds",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+	metaClosedTimestampFailuresToClose = metric.Metadata{
+		Name:        "kv.closed_timestamp.failures_to_close",
+		Help:        "Number of times the min prop tracker failed to close timestamps due to epoch mismatch or pending evaluations",
+		Measurement: "Attempts",
+		Unit:        metric.Unit_COUNT,
+	}
 )
 
 // StoreMetrics is the set of metrics for a given store.
@@ -1071,20 +1103,25 @@ type StoreMetrics struct {
 	RdbNumSSTables              *metric.Gauge
 	RdbPendingCompaction        *metric.Gauge
 
+	// Disk health metrics.
+	DiskSlow    *metric.Gauge
+	DiskStalled *metric.Gauge
+
 	// TODO(mrtracy): This should be removed as part of #4465. This is only
 	// maintained to keep the current structure of NodeStatus; it would be
 	// better to convert the Gauges above into counters which are adjusted
 	// accordingly.
 
 	// Range event metrics.
-	RangeSplits                  *metric.Counter
-	RangeMerges                  *metric.Counter
-	RangeAdds                    *metric.Counter
-	RangeRemoves                 *metric.Counter
-	RangeSnapshotsGenerated      *metric.Counter
-	RangeSnapshotsNormalApplied  *metric.Counter
-	RangeSnapshotsLearnerApplied *metric.Counter
-	RangeRaftLeaderTransfers     *metric.Counter
+	RangeSplits                                  *metric.Counter
+	RangeMerges                                  *metric.Counter
+	RangeAdds                                    *metric.Counter
+	RangeRemoves                                 *metric.Counter
+	RangeSnapshotsGenerated                      *metric.Counter
+	RangeSnapshotsAppliedByVoters                *metric.Counter
+	RangeSnapshotsAppliedForInitialUpreplication *metric.Counter
+	RangeSnapshotsAppliedByNonVoters             *metric.Counter
+	RangeRaftLeaderTransfers                     *metric.Counter
 
 	// Raft processing metrics.
 	RaftTicks                 *metric.Counter
@@ -1095,6 +1132,7 @@ type StoreMetrics struct {
 	RaftCommandCommitLatency  *metric.Histogram
 	RaftHandleReadyLatency    *metric.Histogram
 	RaftApplyCommittedLatency *metric.Histogram
+	RaftSchedulerLatency      *metric.Histogram
 
 	// Raft message metrics.
 	//
@@ -1190,7 +1228,8 @@ type StoreMetrics struct {
 	RangeFeedMetrics *rangefeed.Metrics
 
 	// Closed timestamp metrics.
-	ClosedTimestampMaxBehindNanos *metric.Gauge
+	ClosedTimestampMaxBehindNanos  *metric.Gauge
+	ClosedTimestampFailuresToClose *metric.Gauge
 }
 
 // TenantsStorageMetrics are metrics which are aggregated over all tenants
@@ -1435,15 +1474,20 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RdbNumSSTables:              metric.NewGauge(metaRdbNumSSTables),
 		RdbPendingCompaction:        metric.NewGauge(metaRdbPendingCompaction),
 
+		// Disk health metrics.
+		DiskSlow:    metric.NewGauge(metaDiskSlow),
+		DiskStalled: metric.NewGauge(metaDiskStalled),
+
 		// Range event metrics.
-		RangeSplits:                  metric.NewCounter(metaRangeSplits),
-		RangeMerges:                  metric.NewCounter(metaRangeMerges),
-		RangeAdds:                    metric.NewCounter(metaRangeAdds),
-		RangeRemoves:                 metric.NewCounter(metaRangeRemoves),
-		RangeSnapshotsGenerated:      metric.NewCounter(metaRangeSnapshotsGenerated),
-		RangeSnapshotsNormalApplied:  metric.NewCounter(metaRangeSnapshotsNormalApplied),
-		RangeSnapshotsLearnerApplied: metric.NewCounter(metaRangeSnapshotsLearnerApplied),
-		RangeRaftLeaderTransfers:     metric.NewCounter(metaRangeRaftLeaderTransfers),
+		RangeSplits:                   metric.NewCounter(metaRangeSplits),
+		RangeMerges:                   metric.NewCounter(metaRangeMerges),
+		RangeAdds:                     metric.NewCounter(metaRangeAdds),
+		RangeRemoves:                  metric.NewCounter(metaRangeRemoves),
+		RangeSnapshotsGenerated:       metric.NewCounter(metaRangeSnapshotsGenerated),
+		RangeSnapshotsAppliedByVoters: metric.NewCounter(metaRangeSnapshotsAppliedByVoters),
+		RangeSnapshotsAppliedForInitialUpreplication: metric.NewCounter(metaRangeSnapshotsAppliedForInitialUpreplication),
+		RangeSnapshotsAppliedByNonVoters:             metric.NewCounter(metaRangeSnapshotsAppliedByNonVoter),
+		RangeRaftLeaderTransfers:                     metric.NewCounter(metaRangeRaftLeaderTransfers),
 
 		// Raft processing metrics.
 		RaftTicks:                 metric.NewCounter(metaRaftTicks),
@@ -1454,6 +1498,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RaftCommandCommitLatency:  metric.NewLatency(metaRaftCommandCommitLatency, histogramWindow),
 		RaftHandleReadyLatency:    metric.NewLatency(metaRaftHandleReadyLatency, histogramWindow),
 		RaftApplyCommittedLatency: metric.NewLatency(metaRaftApplyCommittedLatency, histogramWindow),
+		RaftSchedulerLatency:      metric.NewLatency(metaRaftSchedulerLatency, histogramWindow),
 
 		// Raft message metrics.
 		RaftRcvdMessages: [...]*metric.Counter{
@@ -1561,7 +1606,8 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RangeFeedMetrics: rangefeed.NewMetrics(),
 
 		// Closed timestamp metrics.
-		ClosedTimestampMaxBehindNanos: metric.NewGauge(metaClosedTimestampMaxBehindNanos),
+		ClosedTimestampMaxBehindNanos:  metric.NewGauge(metaClosedTimestampMaxBehindNanos),
+		ClosedTimestampFailuresToClose: metric.NewGauge(metaClosedTimestampFailuresToClose),
 	}
 	storeRegistry.AddMetricStruct(sm)
 
@@ -1606,24 +1652,26 @@ func (sm *TenantsStorageMetrics) subtractMVCCStats(
 	sm.incMVCCGauges(ctx, tenantID, neg)
 }
 
-func (sm *StoreMetrics) updateRocksDBStats(stats storage.Stats) {
-	// We do not grab a lock here, because it's not possible to get a point-in-
-	// time snapshot of RocksDB stats. Retrieving RocksDB stats doesn't grab any
-	// locks, and there's no way to retrieve multiple stats in a single operation.
-	sm.RdbBlockCacheHits.Update(stats.BlockCacheHits)
-	sm.RdbBlockCacheMisses.Update(stats.BlockCacheMisses)
-	sm.RdbBlockCacheUsage.Update(stats.BlockCacheUsage)
-	sm.RdbBlockCachePinnedUsage.Update(stats.BlockCachePinnedUsage)
-	sm.RdbBloomFilterPrefixUseful.Update(stats.BloomFilterPrefixUseful)
-	sm.RdbBloomFilterPrefixChecked.Update(stats.BloomFilterPrefixChecked)
-	sm.RdbMemtableTotalSize.Update(stats.MemtableTotalSize)
-	sm.RdbFlushes.Update(stats.Flushes)
-	sm.RdbFlushedBytes.Update(stats.FlushedBytes)
-	sm.RdbCompactions.Update(stats.Compactions)
-	sm.RdbIngestedBytes.Update(stats.IngestedBytes)
-	sm.RdbCompactedBytesRead.Update(stats.CompactedBytesRead)
-	sm.RdbCompactedBytesWritten.Update(stats.CompactedBytesWritten)
-	sm.RdbTableReadersMemEstimate.Update(stats.TableReadersMemEstimate)
+func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
+	sm.RdbBlockCacheHits.Update(m.BlockCacheHits)
+	sm.RdbBlockCacheMisses.Update(m.BlockCacheMisses)
+	sm.RdbBlockCacheUsage.Update(m.BlockCacheUsage)
+	sm.RdbBlockCachePinnedUsage.Update(m.BlockCachePinnedUsage)
+	sm.RdbBloomFilterPrefixUseful.Update(m.BloomFilterPrefixUseful)
+	sm.RdbBloomFilterPrefixChecked.Update(m.BloomFilterPrefixChecked)
+	sm.RdbMemtableTotalSize.Update(m.MemtableTotalSize)
+	sm.RdbFlushes.Update(m.Flushes)
+	sm.RdbFlushedBytes.Update(m.FlushedBytes)
+	sm.RdbCompactions.Update(m.Compactions)
+	sm.RdbIngestedBytes.Update(m.IngestedBytes)
+	sm.RdbCompactedBytesRead.Update(m.CompactedBytesRead)
+	sm.RdbCompactedBytesWritten.Update(m.CompactedBytesWritten)
+	sm.RdbTableReadersMemEstimate.Update(m.TableReadersMemEstimate)
+	sm.RdbReadAmplification.Update(m.ReadAmplification)
+	sm.RdbPendingCompaction.Update(m.PendingCompactionBytesEstimate)
+	sm.RdbNumSSTables.Update(m.NumSSTables)
+	sm.DiskSlow.Update(m.DiskSlowCount)
+	sm.DiskStalled.Update(m.DiskStallCount)
 }
 
 func (sm *StoreMetrics) updateEnvStats(stats storage.EnvStats) {

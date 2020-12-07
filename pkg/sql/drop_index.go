@@ -19,15 +19,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 )
 
@@ -41,6 +42,14 @@ type dropIndexNode struct {
 //   Notes: postgres allows only the index owner to DROP an index.
 //          mysql requires the INDEX privilege on the table.
 func (p *planner) DropIndex(ctx context.Context, n *tree.DropIndex) (planNode, error) {
+	if err := checkSchemaChangeEnabled(
+		ctx,
+		&p.ExecCfg().Settings.SV,
+		"DROP INDEX",
+	); err != nil {
+		return nil, err
+	}
+
 	// Keep a track of the indexes that exist to check. When the IF EXISTS
 	// options are provided, we will simply not include any indexes that
 	// don't exist and continue execution.
@@ -74,7 +83,7 @@ func (n *dropIndexNode) startExec(params runParams) error {
 	telemetry.Inc(sqltelemetry.SchemaChangeDropCounter("index"))
 
 	if n.n.Concurrently {
-		params.p.SendClientNotice(
+		params.p.BufferClientNotice(
 			params.ctx,
 			pgnotice.Newf("CONCURRENTLY is not required as all indexes are dropped concurrently"),
 		)
@@ -88,7 +97,7 @@ func (n *dropIndexNode) startExec(params runParams) error {
 		// drop need to be visible to the second drop.
 		tableDesc, err := params.p.ResolveMutableTableDescriptor(
 			ctx, index.tn, true /*required*/, tree.ResolveRequireTableOrViewDesc)
-		if sqlbase.IsUndefinedRelationError(err) {
+		if sqlerrors.IsUndefinedRelationError(err) {
 			// Somehow the descriptor we had during planning is not there
 			// any more.
 			return errors.NewAssertionErrorWithWrappedErrf(err,
@@ -133,9 +142,7 @@ func (n *dropIndexNode) startExec(params runParams) error {
 // dropShardColumnAndConstraint drops the given shard column and its associated check
 // constraint.
 func (n *dropIndexNode) dropShardColumnAndConstraint(
-	params runParams,
-	tableDesc *sqlbase.MutableTableDescriptor,
-	shardColDesc *descpb.ColumnDescriptor,
+	params runParams, tableDesc *tabledesc.Mutable, shardColDesc *descpb.ColumnDescriptor,
 ) error {
 	validChecks := tableDesc.Checks[:0]
 	for _, check := range tableDesc.AllActiveAndInactiveChecks() {
@@ -158,19 +165,15 @@ func (n *dropIndexNode) dropShardColumnAndConstraint(
 	tableDesc.AddColumnMutation(shardColDesc, descpb.DescriptorMutation_DROP)
 	for i := range tableDesc.Columns {
 		if tableDesc.Columns[i].ID == shardColDesc.ID {
-			tmp := tableDesc.Columns[:0]
-			for j, col := range tableDesc.Columns {
-				if i == j {
-					continue
-				}
-				tmp = append(tmp, col)
-			}
-			tableDesc.Columns = tmp
+			// Note the third slice parameter which will force a copy of the backing
+			// array if the column being removed is not the last column.
+			tableDesc.Columns = append(tableDesc.Columns[:i:i],
+				tableDesc.Columns[i+1:]...)
 			break
 		}
 	}
 
-	if err := tableDesc.AllocateIDs(); err != nil {
+	if err := tableDesc.AllocateIDs(params.ctx); err != nil {
 		return err
 	}
 	mutationID := tableDesc.ClusterVersion.NextMutationID
@@ -187,7 +190,7 @@ func (n *dropIndexNode) dropShardColumnAndConstraint(
 //
 // Assumes that the given index is sharded.
 func (n *dropIndexNode) maybeDropShardColumn(
-	params runParams, tableDesc *sqlbase.MutableTableDescriptor, shardColName string,
+	params runParams, tableDesc *tabledesc.Mutable, shardColName string,
 ) error {
 	shardColDesc, dropped, err := tableDesc.FindColumnByName(tree.Name(shardColName))
 	if err != nil {
@@ -234,7 +237,7 @@ func (p *planner) dropIndexByName(
 	ctx context.Context,
 	tn *tree.TableName,
 	idxName tree.UnrestrictedName,
-	tableDesc *sqlbase.MutableTableDescriptor,
+	tableDesc *tabledesc.Mutable,
 	ifExists bool,
 	behavior tree.DropBehavior,
 	constraintBehavior dropIndexConstraintBehavior,
@@ -249,7 +252,7 @@ func (p *planner) dropIndexByName(
 			return nil
 		}
 		// Index does not exist, but we want it to: error out.
-		return err
+		return pgerror.WithCandidateCode(err, pgcode.UndefinedObject)
 	}
 	if dropped {
 		return nil
@@ -282,8 +285,8 @@ func (p *planner) dropIndexByName(
 					zone.Subzones,
 					false, /* newSubzones */
 				)
-				if sqlbase.IsCCLRequiredError(err) {
-					return sqlbase.NewCCLRequiredError(fmt.Errorf("schema change requires a CCL binary "+
+				if sqlerrors.IsCCLRequiredError(err) {
+					return sqlerrors.NewCCLRequiredError(fmt.Errorf("schema change requires a CCL binary "+
 						"because table %q has at least one remaining index or partition with a zone config",
 						tableDesc.Name))
 				}
@@ -331,14 +334,6 @@ func (p *planner) dropIndexByName(
 		}
 		return foundReplacement
 	}
-	// If we aren't at the cluster version where we have removed explicit foreign key IDs
-	// from the foreign key descriptors, fall back to the existing drop index logic.
-	// That means we pretend that we can never find replacements for any indexes.
-	if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.VersionNoExplicitForeignKeyIndexIDs) {
-		indexHasReplacementCandidate = func(func(*descpb.IndexDescriptor) bool) bool {
-			return false
-		}
-	}
 
 	// Check for foreign key mutations referencing this index.
 	for _, m := range tableDesc.Mutations {
@@ -362,7 +357,7 @@ func (p *planner) dropIndexByName(
 
 	// If the we aren't at a high enough version to drop indexes on the origin
 	// side then we have to attempt to delete them.
-	if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.VersionNoOriginFKIndexes) {
+	if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.NoOriginFKIndexes) {
 		// Index for updating the FK slices in place when removing FKs.
 		sliceIdx := 0
 		for i := range tableDesc.OutboundFKs {
@@ -453,6 +448,16 @@ func (p *planner) dropIndexByName(
 	idxCopy := *idx
 	idx = &idxCopy
 
+	// Currently, a replacement primary index must be specified when dropping the primary index,
+	// and this cannot be done with DROP INDEX.
+	if idx.ID == tableDesc.PrimaryIndex.ID {
+		return errors.WithHint(
+			pgerror.Newf(pgcode.FeatureNotSupported, "cannot drop the primary index of a table using DROP INDEX"),
+			"instead, use ALTER TABLE ... ALTER PRIMARY KEY or"+
+				"use DROP CONSTRAINT ... PRIMARY KEY followed by ADD CONSTRAINT ... PRIMARY KEY in a transaction",
+		)
+	}
+
 	found := false
 	for i, idxEntry := range tableDesc.Indexes {
 		if idxEntry.ID == idx.ID {
@@ -474,7 +479,7 @@ func (p *planner) dropIndexByName(
 					// We have to explicitly check that the range descriptor's start key
 					// lies within the span of the index since ScanMetaKVs returns all
 					// intersecting spans.
-					if (desc.GetStickyBit() != hlc.Timestamp{}) && span.Key.Compare(desc.StartKey.AsRawKey()) <= 0 {
+					if !desc.GetStickyBit().IsEmpty() && span.Key.Compare(desc.StartKey.AsRawKey()) <= 0 {
 						// Swallow "key is not the start of a range" errors because it would
 						// mean that the sticky bit was removed and merged concurrently. DROP
 						// INDEX should not fail because of this.
@@ -498,21 +503,27 @@ func (p *planner) dropIndexByName(
 		}
 	}
 	if !found {
-		return fmt.Errorf("index %q in the middle of being added, try again later", idxName)
+		return pgerror.Newf(
+			pgcode.ObjectNotInPrerequisiteState,
+			"index %q in the middle of being added, try again later",
+			idxName,
+		)
 	}
 
 	if err := p.removeIndexComment(ctx, tableDesc.ID, idx.ID); err != nil {
 		return err
 	}
 
-	if err := tableDesc.Validate(ctx, p.txn, p.ExecCfg().Codec); err != nil {
+	if err := tableDesc.Validate(
+		ctx, catalogkv.NewOneLevelUncachedDescGetter(p.txn, p.ExecCfg().Codec),
+	); err != nil {
 		return err
 	}
 	mutationID := tableDesc.ClusterVersion.NextMutationID
 	if err := p.writeSchemaChange(ctx, tableDesc, mutationID, jobDesc); err != nil {
 		return err
 	}
-	p.SendClientNotice(
+	p.BufferClientNotice(
 		ctx,
 		errors.WithHint(
 			pgnotice.Newf("the data for dropped indexes is reclaimed asynchronously"),
@@ -535,7 +546,7 @@ func (p *planner) dropIndexByName(
 			User                string
 			MutationID          uint32
 			CascadeDroppedViews []string
-		}{tn.FQString(), string(idxName), jobDesc, p.SessionData().User, uint32(mutationID),
+		}{tn.FQString(), string(idxName), jobDesc, p.User().Normalized(), uint32(mutationID),
 			droppedViews},
 	)
 }

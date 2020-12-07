@@ -18,14 +18,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/observedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/spanset"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	opentracing "github.com/opentracing/opentracing-go"
 )
 
 // Send executes a command on this range, dispatching it to the
@@ -65,13 +64,14 @@ func (r *Replica) sendWithRangeID(
 	r.maybeInitializeRaftGroup(ctx)
 
 	isReadOnly := ba.IsReadOnly()
-	useRaft := !isReadOnly && ba.IsWrite()
-
 	if err := r.checkBatchRequest(ba, isReadOnly); err != nil {
 		return nil, roachpb.NewError(err)
 	}
 
 	if err := r.maybeBackpressureBatch(ctx, ba); err != nil {
+		return nil, roachpb.NewError(err)
+	}
+	if err := r.maybeRateLimitBatch(ctx, ba); err != nil {
 		return nil, roachpb.NewError(err)
 	}
 
@@ -89,13 +89,13 @@ func (r *Replica) sendWithRangeID(
 
 	// Differentiate between read-write, read-only, and admin.
 	var pErr *roachpb.Error
-	if useRaft {
-		log.Event(ctx, "read-write path")
-		fn := (*Replica).executeWriteBatch
-		br, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
-	} else if isReadOnly {
+	if isReadOnly {
 		log.Event(ctx, "read-only path")
 		fn := (*Replica).executeReadOnlyBatch
+		br, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
+	} else if ba.IsWrite() {
+		log.Event(ctx, "read-write path")
+		fn := (*Replica).executeWriteBatch
 		br, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
 	} else if ba.IsAdmin() {
 		log.Event(ctx, "admin path")
@@ -124,6 +124,7 @@ func (r *Replica) sendWithRangeID(
 		r.maybeAddRangeInfoToResponse(ctx, ba, br)
 	}
 
+	r.recordImpactOnRateLimiter(ctx, br)
 	return br, pErr
 }
 
@@ -134,7 +135,7 @@ func (r *Replica) maybeAddRangeInfoToResponse(
 		desc, lease := r.GetDescAndLease(ctx)
 		br.RangeInfos = []roachpb.RangeInfo{{Desc: desc, Lease: lease}}
 
-		if !r.ClusterSettings().Version.IsActive(ctx, clusterversion.VersionClientRangeInfosOnBatchResponse) {
+		if !r.ClusterSettings().Version.IsActive(ctx, clusterversion.ClientRangeInfosOnBatchResponse) {
 			// Also set the RangeInfo on the individual responses, for compatibility
 			// with 20.1.
 			for _, r := range br.Responses {
@@ -170,6 +171,56 @@ func returnRangeInfoIfClientStale(
 			Lease: lease,
 		},
 	}
+
+	// We're going to sometimes return info on the ranges coming right before or
+	// right after r, if it looks like r came from a range that has recently split
+	// and the client doesn't know about it. After a split, the client benefits
+	// from learning about both resulting ranges.
+
+	if cinfo.DescriptorGeneration >= desc.Generation {
+		return
+	}
+
+	maybeAddRange := func(rr KeyRange) {
+		if rr.Desc().Generation != desc.Generation {
+			// The next range does not look like it came from a split that produced
+			// both r and this next range. Of course, this has false negatives (e.g.
+			// if either the LHS or the RHS split multiple times since the client's
+			// version). For best fidelity, the client could send the range's start
+			// and end keys and the server could use that to return all overlapping
+			// descriptors (like we do for RangeKeyMismatchErrors), but sending those
+			// keys on every RPC seems too expensive.
+			return
+		}
+
+		var rangeInfo roachpb.RangeInfo
+		if rep, ok := rr.(*Replica); ok {
+			// Note that we return the lease even if it's expired. The kvclient can
+			// use it as it sees fit.
+			rangeInfo.Desc, rangeInfo.Lease = rep.GetDescAndLease(ctx)
+		} else {
+			rangeInfo.Desc = *rr.Desc()
+		}
+		br.RangeInfos = append(br.RangeInfos, rangeInfo)
+	}
+
+	r.store.VisitReplicasByKey(ctx, roachpb.RKeyMin, desc.StartKey, DescendingKeyOrder, func(ctx context.Context, prevR KeyRange) bool {
+		if !prevR.Desc().EndKey.Equal(desc.StartKey) {
+			// The next range does not correspond to the range immediately preceding r.
+			return false
+		}
+		maybeAddRange(prevR)
+		return false
+	})
+
+	r.store.VisitReplicasByKey(ctx, desc.EndKey, roachpb.RKeyMax, AscendingKeyOrder, func(ctx context.Context, nextR KeyRange) bool {
+		if !nextR.Desc().StartKey.Equal(desc.EndKey) {
+			// The next range does not correspond to the range immediately after r.
+			return false
+		}
+		maybeAddRange(nextR)
+		return false
+	})
 }
 
 // batchExecutionFn is a method on Replica that is able to execute a
@@ -255,7 +306,7 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 			}
 		}
 		// Limit the transaction's maximum timestamp using observed timestamps.
-		r.limitTxnMaxTimestamp(ctx, ba, status)
+		ba.Txn = observedts.LimitTxnMaxTimestamp(ctx, ba.Txn, status)
 
 		// Determine the maximal set of key spans that the batch will operate
 		// on. We only need to do this once and we make sure to do so after we
@@ -490,7 +541,7 @@ func (r *Replica) executeAdminBatch(
 	}
 
 	args := ba.Requests[0].GetInner()
-	if sp := opentracing.SpanFromContext(ctx); sp != nil {
+	if sp := tracing.SpanFromContext(ctx); sp != nil {
 		sp.SetOperationName(reflect.TypeOf(args).String())
 	}
 
@@ -505,7 +556,7 @@ func (r *Replica) executeAdminBatch(
 	// NB: we pass nil for the spanlatch guard because we haven't acquired
 	// latches yet. This is ok because each individual request that the admin
 	// request sends will acquire latches.
-	if err := r.checkExecutionCanProceed(ctx, ba, nil /* g */, &status); err != nil {
+	if _, err := r.checkExecutionCanProceed(ctx, ba, nil /* g */, &status); err != nil {
 		return nil, roachpb.NewError(err)
 	}
 
@@ -593,7 +644,7 @@ func (r *Replica) executeAdminBatch(
 // TODO(tschottdorf): should check that request is contained in range and that
 // EndTxn only occurs at the very end.
 func (r *Replica) checkBatchRequest(ba *roachpb.BatchRequest, isReadOnly bool) error {
-	if ba.Timestamp == (hlc.Timestamp{}) {
+	if ba.Timestamp.IsEmpty() {
 		// For transactional requests, Store.Send sets the timestamp. For non-
 		// transactional requests, the client sets the timestamp. Either way, we
 		// need to have a timestamp at this point.
@@ -627,14 +678,16 @@ func (r *Replica) collectSpans(
 	// TODO(bdarnell): revisit as the local portion gets its appropriate
 	// use.
 	if ba.IsLocking() {
-		guess := len(ba.Requests)
+		latchGuess := len(ba.Requests)
 		if et, ok := ba.GetArg(roachpb.EndTxn); ok {
 			// EndTxn declares a global write for each of its lock spans.
-			guess += len(et.(*roachpb.EndTxnRequest).LockSpans) - 1
+			latchGuess += len(et.(*roachpb.EndTxnRequest).LockSpans) - 1
 		}
-		latchSpans.Reserve(spanset.SpanReadWrite, spanset.SpanGlobal, guess)
+		latchSpans.Reserve(spanset.SpanReadWrite, spanset.SpanGlobal, latchGuess)
+		lockSpans.Reserve(spanset.SpanReadWrite, spanset.SpanGlobal, len(ba.Requests))
 	} else {
 		latchSpans.Reserve(spanset.SpanReadOnly, spanset.SpanGlobal, len(ba.Requests))
+		lockSpans.Reserve(spanset.SpanReadOnly, spanset.SpanGlobal, len(ba.Requests))
 	}
 
 	// For non-local, MVCC spans we annotate them with the request timestamp
@@ -668,62 +721,4 @@ func (r *Replica) collectSpans(
 	}
 
 	return latchSpans, lockSpans, nil
-}
-
-// limitTxnMaxTimestamp limits the batch transaction's max timestamp
-// so that it respects any timestamp already observed on this node.
-// This prevents unnecessary uncertainty interval restarts caused by
-// reading a value written at a timestamp between txn.Timestamp and
-// txn.MaxTimestamp. The replica lease's start time is also taken into
-// consideration to ensure that a lease transfer does not result in
-// the observed timestamp for this node being inapplicable to data
-// previously written by the former leaseholder. To wit:
-//
-// 1. put(k on leaseholder n1), gateway chooses t=1.0
-// 2. begin; read(unrelated key on n2); gateway chooses t=0.98
-// 3. pick up observed timestamp for n2 of t=0.99
-// 4. n1 transfers lease for range with k to n2 @ t=1.1
-// 5. read(k) on leaseholder n2 at ReadTimestamp=0.98 should get
-//    ReadWithinUncertaintyInterval because of the write in step 1, so
-//    even though we observed n2's timestamp in step 3 we must expand
-//    the uncertainty interval to the lease's start time, which is
-//    guaranteed to be greater than any write which occurred under
-//    the previous leaseholder.
-func (r *Replica) limitTxnMaxTimestamp(
-	ctx context.Context, ba *roachpb.BatchRequest, status kvserverpb.LeaseStatus,
-) {
-	if ba.Txn == nil {
-		return
-	}
-	// For calls that read data within a txn, we keep track of timestamps
-	// observed from the various participating nodes' HLC clocks. If we have
-	// a timestamp on file for this Node which is smaller than MaxTimestamp,
-	// we can lower MaxTimestamp accordingly. If MaxTimestamp drops below
-	// ReadTimestamp, we effectively can't see uncertainty restarts anymore.
-	// TODO(nvanbenschoten): This should use the lease's node id.
-	obsTS, ok := ba.Txn.GetObservedTimestamp(ba.Replica.NodeID)
-	if !ok {
-		return
-	}
-	// If the lease is valid, we use the greater of the observed
-	// timestamp and the lease start time, up to the max timestamp. This
-	// ensures we avoid incorrect assumptions about when data was
-	// written, in absolute time on a different node, which held the
-	// lease before this replica acquired it.
-	// TODO(nvanbenschoten): Do we ever need to call this when
-	//   status.State != VALID?
-	if status.State == kvserverpb.LeaseState_VALID {
-		obsTS.Forward(status.Lease.Start)
-	}
-	if obsTS.Less(ba.Txn.MaxTimestamp) {
-		// Copy-on-write to protect others we might be sharing the Txn with.
-		txnClone := ba.Txn.Clone()
-		// The uncertainty window is [ReadTimestamp, maxTS), so if that window
-		// is empty, there won't be any uncertainty restarts.
-		if obsTS.LessEq(ba.Txn.ReadTimestamp) {
-			log.Event(ctx, "read has no clock uncertainty")
-		}
-		txnClone.MaxTimestamp.Backward(obsTS)
-		ba.Txn = txnClone
-	}
 }

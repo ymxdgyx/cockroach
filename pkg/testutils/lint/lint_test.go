@@ -444,12 +444,16 @@ func TestLint(t *testing.T) {
 					":!ccl/backupccl/backup_test.go",
 					":!storage/cloudimpl",
 					":!ccl/workloadccl/fixture_test.go",
+					":!internal/gopath/gopath.go",
 					":!cmd",
+					":!util/cgroups/cgroups.go",
 					":!nightly",
 					":!testutils/lint",
 					":!util/envutil/env.go",
+					":!testutils/bazel.go",
 					":!util/log/tracebacks.go",
 					":!util/sdnotify/sdnotify_unix.go",
+					":!util/grpcutil", // GRPC_GO_* variables
 				},
 			},
 		} {
@@ -707,14 +711,15 @@ func TestLint(t *testing.T) {
 			"git",
 			"grep",
 			"-nE",
-			`\btime\.(Now|Since|Unix)\(`,
+			`\btime\.(Now|Since|Unix|LoadLocation)\(`,
 			"--",
 			"*.go",
 			":!**/embedded.go",
-			":!util/timeutil/time.go",
 			":!util/timeutil/now_unix.go",
 			":!util/timeutil/now_windows.go",
-			":!util/tracing/tracer_span.go",
+			":!util/timeutil/time.go",
+			":!util/timeutil/zoneinfo.go",
+			":!util/tracing/span.go",
 			":!util/tracing/tracer.go",
 		)
 		if err != nil {
@@ -727,6 +732,38 @@ func TestLint(t *testing.T) {
 
 		if err := stream.ForEach(filter, func(s string) {
 			t.Errorf("\n%s <- forbidden; use 'timeutil' instead", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
+	t.Run("TestOsErrorIs", func(t *testing.T) {
+		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-nE",
+			`\bos\.Is(Exist|NotExist|Timeout|Permission)`,
+			"--",
+			"*.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(filter, func(s string) {
+			t.Errorf("\n%s <- forbidden; use 'oserror' instead", s)
 		}); err != nil {
 			t.Error(err)
 		}
@@ -981,6 +1018,7 @@ func TestLint(t *testing.T) {
 			":!*.pb.go",
 			":!util/protoutil/marshal.go",
 			":!util/protoutil/marshaler.go",
+			":!util/encoding/encoding.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -1006,6 +1044,42 @@ func TestLint(t *testing.T) {
 		}
 	})
 
+	// TestProtoEqual forbids use of proto's Equal() function. It panics
+	// on types which alias the Go string type.
+	t.Run("TestProtoEqual", func(t *testing.T) {
+		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-nEw",
+			`proto\.Equal`,
+			"--",
+			"*.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(stream.Sequence(
+			filter,
+		), func(s string) {
+			t.Errorf("\n%s <- forbidden; use '.Equal()' method instead or  reflect.DeepEqual()", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
 	t.Run("TestProtoMessage", func(t *testing.T) {
 		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
 		cmd, stderr, filter, err := dirCmd(
@@ -1018,13 +1092,15 @@ func TestLint(t *testing.T) {
 			"*.go",
 			":!*.pb.go",
 			":!*.pb.gw.go",
+			":!sql/pgwire/pgerror/constraint_name.go",
 			":!sql/pgwire/pgerror/severity.go",
 			":!sql/pgwire/pgerror/with_candidate_code.go",
+			":!sql/pgwire/pgwirebase/too_big_error.go",
 			":!sql/colexecbase/colexecerror/error.go",
 			":!util/protoutil/jsonpb_marshal.go",
 			":!util/protoutil/marshal.go",
 			":!util/protoutil/marshaler.go",
-			":!util/tracing/tracer_span.go",
+			":!util/tracing/span.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -1038,6 +1114,48 @@ func TestLint(t *testing.T) {
 			filter,
 		), func(s string) {
 			t.Errorf("\n%s <- forbidden; use 'protoutil.Message' instead", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
+	t.Run("TestOsExit", func(t *testing.T) {
+		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-nEw",
+			`os\.Exit`,
+			"--",
+			"*.go",
+			":!*_test.go",
+			":!acceptance",
+			":!cmd",
+			":!cli/exit",
+			":!bench/cmd",
+			":!sql/opt/optgen",
+			":!sql/colexec/execgen",
+			":!roachpb/gen_batch.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(stream.Sequence(
+			filter,
+		), func(s string) {
+			t.Errorf("\n%s <- forbidden; use 'exit.WithCode' instead", s)
 		}); err != nil {
 			t.Error(err)
 		}
@@ -1116,8 +1234,9 @@ func TestLint(t *testing.T) {
 
 		ignoredRules := []string{
 			"licence",
-			"mitre",   // PostGIS commands spell these as mitre.
-			"analyse", // required by SQL grammar
+			"mitre",     // PostGIS commands spell these as mitre.
+			"analyse",   // required by SQL grammar
+			"seperator", // pkg/ui depends on 3rd party package (rc-calendar) with spelling
 		}
 
 		if err := stream.ForEach(stream.Sequence(
@@ -1128,6 +1247,8 @@ func TestLint(t *testing.T) {
 			stream.GrepNot(`^workload/tpcds/tpcds.go$`),
 			stream.GrepNot(`^geo/geoprojbase/projections.go$`),
 			stream.GrepNot(`^sql/logictest/testdata/logic_test/pg_extension$`),
+			stream.GrepNot(`^sql/opt/testutils/opttester/testfixtures/.*`),
+			stream.GrepNot(`^util/timeutil/lowercase_timezones.go$`),
 			stream.Map(func(s string) string {
 				return filepath.Join(pkgDir, s)
 			}),
@@ -1273,6 +1394,7 @@ func TestLint(t *testing.T) {
 			"golang.org/x/sync/singleflight":              "github.com/cockroachdb/cockroach/pkg/util/syncutil/singleflight",
 			"syscall":                                     "sysutil",
 			"errors":                                      "github.com/cockroachdb/errors",
+			"oserror":                                     "github.com/cockroachdb/errors/oserror",
 			"github.com/pkg/errors":                       "github.com/cockroachdb/errors",
 			"github.com/cockroachdb/errors/assert":        "github.com/cockroachdb/errors",
 			"github.com/cockroachdb/errors/barriers":      "github.com/cockroachdb/errors",
@@ -1515,7 +1637,7 @@ func TestLint(t *testing.T) {
 			"git",
 			"grep",
 			"-nE",
-			fmt.Sprintf(`panic\(.*\)`),
+			`panic\(.*\)`,
 			"--",
 			// NOTE: if you're adding a new package to the list here because it
 			// uses "panic-catch" error propagation mechanism of the vectorized
@@ -1523,7 +1645,6 @@ func TestLint(t *testing.T) {
 			// sql/colexecbase/colexecerror/error.go file.
 			"sql/col*",
 			":!sql/colexecbase/colexecerror/error.go",
-			":!sql/colexec/execpb/stats.pb.go",
 			":!sql/colflow/vectorized_panic_propagation_test.go",
 			// This exception is because execgen itself uses panics during code
 			// generation - not at execution time. The (glob,exclude) directive
@@ -1565,7 +1686,7 @@ func TestLint(t *testing.T) {
 			// - coldata.NewMemColumn
 			// - coldata.Batch.AppendCol
 			// TODO(yuzefovich): prohibit call to coldata.NewMemBatchNoCols.
-			fmt.Sprintf(`(coldata\.NewMem(Batch|BatchWithCapacity|Column)|\.AppendCol)\(`),
+			`(coldata\.NewMem(Batch|BatchWithCapacity|Column)|\.AppendCol)\(`,
 			"--",
 			// TODO(yuzefovich): prohibit calling coldata.* methods from other
 			// sql/col* packages.
@@ -1604,7 +1725,7 @@ func TestLint(t *testing.T) {
 			// We prohibit usage of colmem.Allocator.NewMemBatchWithMaxCapacity
 			// in order to remind us to think whether we want the dynamic batch
 			// size behavior or not.
-			fmt.Sprintf(`\.NewMemBatchWithMaxCapacity\(`),
+			`\.NewMemBatchWithMaxCapacity\(`,
 			"--",
 			"sql/col*",
 			":!sql/col*_test.go",
@@ -1639,7 +1760,7 @@ func TestLint(t *testing.T) {
 			"-nE",
 			// We prohibit usage of Allocator.MaybeAppendColumn outside of
 			// vectorTypeEnforcer and batchSchemaPrefixEnforcer.
-			fmt.Sprintf(`(MaybeAppendColumn)\(`),
+			`(MaybeAppendColumn)\(`,
 			"--",
 			"sql/col*",
 			":!sql/colexec/operator.go",
@@ -1676,7 +1797,7 @@ func TestLint(t *testing.T) {
 			"-nE",
 			// We prohibit appending to the type schema and require allocating
 			// a new slice. See the comment in execplan.go file.
-			fmt.Sprintf(`(yps|ypes) = append\(`),
+			`(yps|ypes) = append\(`,
 			"--",
 			"sql/colexec/execplan.go",
 		)
@@ -1722,7 +1843,7 @@ func TestLint(t *testing.T) {
 			"git",
 			"grep",
 			"-nE",
-			fmt.Sprintf(`\[\]types.T`),
+			`\[\]types.T`,
 			"--",
 		)
 		if err != nil {
@@ -1818,6 +1939,10 @@ func TestLint(t *testing.T) {
 			// Ignore types that can change by system.
 			stream.GrepNot(`pkg/util/sysutil/sysutil_unix.go:`),
 
+			// Ignore jemalloc issues warnings.
+			stream.GrepNot(`In file included from.*(start|runtime)_jemalloc\.go`),
+			stream.GrepNot(`include/jemalloc/jemalloc\.h`),
+
 			stream.GrepNot(`declaration of "?(pE|e)rr"? shadows`),
 			stream.GrepNot(`\.pb\.gw\.go:[0-9:]+: declaration of "?ctx"? shadows`),
 			stream.GrepNot(`\.[eo]g\.go:[0-9:]+: declaration of ".*" shadows`),
@@ -1839,6 +1964,8 @@ func TestLint(t *testing.T) {
 			// error encode/decode, it can be dropped from the linter
 			// exception as well.
 			stream.GrepNot(`pkg/roachpb/errors\.go:.*invalid direct cast on error object`),
+			// Cast in decode handler.
+			stream.GrepNot(`pkg/sql/pgwire/pgerror/constraint_name\.go:.*invalid direct cast on error object`),
 			// pgerror's pgcode logic uses its own custom cause recursion
 			// algorithm and thus cannot use errors.If() which mandates a
 			// different recursion order.
@@ -1849,20 +1976,11 @@ func TestLint(t *testing.T) {
 			// that function to a different file to limit the scope
 			// of the exception.
 			stream.GrepNot(`pkg/sql/pgwire/pgerror/pgcode\.go:.*invalid direct cast on error object`),
-			// The crash reporting code uses its own custom cause recursion
-			// algorithm and thus cannot use errors.Is.  However, it's also
-			// due an overhaul - it's really redundant with the error
-			// redaction code already present in the errors library.
-			//
-			// TODO(knz): remove the code in log and replace by the errors'
-			// own redact code.
-			stream.GrepNot(`pkg/util/log/crash_reporting\.go:.*invalid direct cast on error object`),
-			stream.GrepNot(`pkg/util/log/crash_reporting\.go:.*invalid direct comparison of error object`),
 			// The logging package translates log.Fatal calls into errors.
 			// We can't use the regular exception mechanism via functions.go
 			// because addStructured takes its positional argument as []interface{},
 			// instead of ...interface{}.
-			stream.GrepNot(`pkg/util/log/structured\.go:\d+:\d+: addStructured\(\): format argument is not a constant expression`),
+			stream.GrepNot(`pkg/util/log/channels\.go:\d+:\d+: logfDepth\(\): format argument is not a constant expression`),
 			// roachtest is not collecting redactable logs so we don't care
 			// about printf hygiene there as much.
 			stream.GrepNot(`pkg/cmd/roachtest/log\.go:.*format argument is not a constant expression`),

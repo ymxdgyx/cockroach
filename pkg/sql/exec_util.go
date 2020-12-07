@@ -20,11 +20,11 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
@@ -42,14 +42,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/accessors"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/database"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/hydratedtables"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/gcjob/gcjobnotifier"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -59,6 +59,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
@@ -71,9 +72,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // ClusterOrganization is the organization name.
@@ -119,6 +120,30 @@ var defaultIntSize = func() *settings.IntSetting {
 	s.SetVisibility(settings.Public)
 	return s
 }()
+
+const allowCrossDatabaseFKsSetting = "sql.cross_db_fks.enabled"
+
+var allowCrossDatabaseFKs = settings.RegisterPublicBoolSetting(
+	allowCrossDatabaseFKsSetting,
+	"if true, creating foreign key references across databases is allowed",
+	false,
+)
+
+const allowCrossDatabaseViewsSetting = "sql.cross_db_views.enabled"
+
+var allowCrossDatabaseViews = settings.RegisterPublicBoolSetting(
+	allowCrossDatabaseViewsSetting,
+	"if true, creating views that refer to other databases is allowed",
+	false,
+)
+
+const allowCrossDatabaseSeqOwnerSetting = "sql.cross_db_sequence_owners.enabled"
+
+var allowCrossDatabaseSeqOwner = settings.RegisterPublicBoolSetting(
+	allowCrossDatabaseSeqOwnerSetting,
+	"if true, creating sequences owned by tables from other databases is allowed",
+	false,
+)
 
 // traceTxnThreshold can be used to log SQL transactions that take
 // longer than duration to complete. For example, traceTxnThreshold=1s
@@ -183,18 +208,6 @@ var hashShardedIndexesEnabledClusterMode = settings.RegisterBoolSetting(
 	false,
 )
 
-var enumsEnabledClusterMode = settings.RegisterBoolSetting(
-	"sql.defaults.experimental_enums.enabled",
-	"default value for experimental_enable_enums; allows for creation and use of ENUM types",
-	false,
-)
-
-var userDefinedSchemasClusterMode = settings.RegisterBoolSetting(
-	"sql.defaults.experimental_user_defined_schemas.enabled",
-	"default value for experimental_enable_user_defined_schemas; allows for creation of user defined schemas",
-	false,
-)
-
 var zigzagJoinClusterMode = settings.RegisterBoolSetting(
 	"sql.defaults.zigzag_join.enabled",
 	"default value for enable_zigzag_join session setting; allows use of zig-zag join by default",
@@ -205,6 +218,12 @@ var optDrivenFKCascadesClusterLimit = settings.RegisterNonNegativeIntSetting(
 	"sql.defaults.foreign_key_cascades_limit",
 	"default value for foreign_key_cascades_limit session setting; limits the number of cascading operations that run as part of a single query",
 	10000,
+)
+
+var preferLookupJoinsForFKs = settings.RegisterBoolSetting(
+	"sql.defaults.prefer_lookup_joins_for_fks.enabled",
+	"default value for prefer_lookup_joins_for_fks session setting; causes foreign key operations to use lookup joins when possible",
+	false,
 )
 
 // optUseHistogramsClusterMode controls the cluster default for whether
@@ -231,13 +250,6 @@ var optUseMultiColStatsClusterMode = settings.RegisterBoolSetting(
 	true,
 )
 
-// TODO(mgartner): Remove this setting once partial indexes are fully supported.
-var partialIndexClusterMode = settings.RegisterBoolSetting(
-	"sql.defaults.experimental_partial_indexes.enabled",
-	"default value for experimental_partial_indexes session setting; disables creation of partial indexes by default",
-	false,
-)
-
 var implicitSelectForUpdateClusterMode = settings.RegisterBoolSetting(
 	"sql.defaults.implicit_select_for_update.enabled",
 	"default value for enable_implicit_select_for_update session setting; enables FOR UPDATE locking during the row-fetch phase of mutation statements",
@@ -250,11 +262,6 @@ var insertFastPathClusterMode = settings.RegisterBoolSetting(
 	true,
 )
 
-var planInterleavedJoins = settings.RegisterBoolSetting(
-	"sql.distsql.interleaved_joins.enabled",
-	"if set we plan interleaved table joins instead of merge joins when possible",
-	true,
-)
 var experimentalAlterColumnTypeGeneralMode = settings.RegisterBoolSetting(
 	"sql.defaults.experimental_alter_column_type.enabled",
 	"default value for experimental_alter_column_type session setting; "+
@@ -268,6 +275,15 @@ var clusterIdleInSessionTimeout = settings.RegisterNonNegativeDurationSetting(
 		"enables automatically killing sessions that exceed the "+
 		"idle_in_session_timeout threshold",
 	0,
+)
+
+// TODO(mgartner): remove this once multi-column inverted indexes are fully
+// supported.
+var experimentalMultiColumnInvertedIndexesMode = settings.RegisterBoolSetting(
+	"sql.defaults.experimental_multi_column_inverted_indexes.enabled",
+	"default value for experimental_enable_multi_column_inverted_indexes session setting;"+
+		"disables multi column inverted indexes by default",
+	false,
 )
 
 // ExperimentalDistSQLPlanningClusterSettingName is the name for the cluster
@@ -298,9 +314,8 @@ var VectorizeClusterMode = settings.RegisterEnumSetting(
 	"default vectorize mode",
 	"on",
 	map[int64]string{
-		int64(sessiondata.VectorizeOff):     "off",
-		int64(sessiondata.Vectorize201Auto): "201auto",
-		int64(sessiondata.VectorizeOn):      "on",
+		int64(sessiondatapb.VectorizeOff): "off",
+		int64(sessiondatapb.VectorizeOn):  "on",
 	},
 )
 
@@ -343,6 +358,12 @@ var SerialNormalizationMode = settings.RegisterPublicEnumSetting(
 		int64(sessiondata.SerialUsesVirtualSequences): "virtual_sequence",
 		int64(sessiondata.SerialUsesSQLSequences):     "sql_sequence",
 	},
+)
+
+var disallowFullTableScans = settings.RegisterPublicBoolSetting(
+	`sql.defaults.disallow_full_table_scans.enabled`,
+	"setting to true rejects queries that have planned a full table scan",
+	false,
 )
 
 var errNoTransactionInProgress = errors.New("there is no transaction in progress")
@@ -660,8 +681,12 @@ type ExecutorConfig struct {
 	LeaseManager      *lease.Manager
 	Clock             *hlc.Clock
 	DistSQLSrv        *distsql.ServerImpl
-	// StatusServer gives access to the Status service.
-	StatusServer      serverpb.OptionalStatusServer
+	// NodesStatusServer gives access to the NodesStatus service and is only
+	// available when running as a system tenant.
+	NodesStatusServer serverpb.OptionalNodesStatusServer
+	// SQLStatusServer gives access to a subset of the Status service and is
+	// available when not running as a system tenant.
+	SQLStatusServer   serverpb.SQLStatusServer
 	MetricsRecorder   nodeStatusGenerator
 	SessionRegistry   *SessionRegistry
 	SQLLivenessReader sqlliveness.Reader
@@ -670,12 +695,10 @@ type ExecutorConfig struct {
 	DistSQLPlanner    *DistSQLPlanner
 	TableStatsCache   *stats.TableStatisticsCache
 	StatsRefresher    *stats.Refresher
-	ExecLogger        *log.SecondaryLogger
-	AuditLogger       *log.SecondaryLogger
-	SlowQueryLogger   *log.SecondaryLogger
-	AuthLogger        *log.SecondaryLogger
 	InternalExecutor  *InternalExecutor
 	QueryCache        *querycache.C
+
+	SchemaChangerMetrics *SchemaChangerMetrics
 
 	TestingKnobs                  ExecutorTestingKnobs
 	PGWireTestingKnobs            *PGWireTestingKnobs
@@ -685,6 +708,7 @@ type ExecutorConfig struct {
 	DistSQLRunTestingKnobs        *execinfra.TestingKnobs
 	EvalContextTestingKnobs       tree.EvalContextTestingKnobs
 	TenantTestingKnobs            *TenantTestingKnobs
+	BackupRestoreTestingKnobs     *BackupRestoreTestingKnobs
 	// HistogramWindowInterval is (server.Config).HistogramWindowInterval.
 	HistogramWindowInterval time.Duration
 
@@ -702,46 +726,23 @@ type ExecutorConfig struct {
 	StmtDiagnosticsRecorder *stmtdiagnostics.Registry
 
 	ExternalIODirConfig base.ExternalIODirConfig
+
+	// HydratedTables is a node-level cache of table descriptors which utilize
+	// user-defined types.
+	HydratedTables *hydratedtables.Cache
+
+	GCJobNotifier *gcjobnotifier.Notifier
+
+	// VersionUpgradeHook is called after validating a `SET CLUSTER SETTING
+	// version` but before executing it. It can carry out arbitrary migrations
+	// that allow us to eventually remove legacy code.
+	VersionUpgradeHook func(ctx context.Context, from, to clusterversion.ClusterVersion) error
 }
 
 // Organization returns the value of cluster.organization.
 func (cfg *ExecutorConfig) Organization() string {
 	return ClusterOrganization.Get(&cfg.Settings.SV)
 }
-
-// StmtDiagnosticsRecorder is the interface into *stmtdiagnostics.Registry to
-// record statement diagnostics.
-type StmtDiagnosticsRecorder interface {
-
-	// ShouldCollectDiagnostics checks whether any data should be collected for the
-	// given query, which is the case if the registry has a request for this
-	// statement's fingerprint; in this case ShouldCollectDiagnostics will not
-	// return true again on this note for the same diagnostics request.
-	//
-	// If data is to be collected, the returned finish() function must always be
-	// called once the data was collected. If collection fails, it can be called
-	// with a collectionErr.
-	ShouldCollectDiagnostics(ctx context.Context, ast tree.Statement) (
-		shouldCollect bool,
-		finish StmtDiagnosticsTraceFinishFunc,
-	)
-
-	// InsertStatementDiagnostics inserts a trace into system.statement_diagnostics.
-	//
-	// traceJSON is either DNull (when collectionErr should not be nil) or a *DJSON.
-	InsertStatementDiagnostics(ctx context.Context,
-		stmtFingerprint string,
-		stmt string,
-		traceJSON tree.Datum,
-		bundleZip []byte,
-	) (id int64, err error)
-}
-
-// StmtDiagnosticsTraceFinishFunc is the type of function returned from
-// ShouldCollectDiagnostics to report the outcome of a trace.
-type StmtDiagnosticsTraceFinishFunc = func(
-	ctx context.Context, traceJSON tree.Datum, bundle []byte, collectionErr error,
-)
 
 var _ base.ModuleTestingKnobs = &ExecutorTestingKnobs{}
 
@@ -810,11 +811,27 @@ type ExecutorTestingKnobs struct {
 
 	// WithStatementTrace is called after the statement is executed in
 	// execStmtInOpenState.
-	WithStatementTrace func(span opentracing.Span, stmt string)
+	WithStatementTrace func(trace tracing.Recording, stmt string)
 
 	// RunAfterSCJobsCacheLookup is called after the SchemaChangeJobCache is checked for
 	// a given table id.
 	RunAfterSCJobsCacheLookup func(*jobs.Job)
+
+	// TestingDescriptorValidation dictates if stronger descriptor validation
+	// should be performed (typically turned on during tests only to guard against
+	// wild descriptors which are corrupted due to bugs).
+	TestingDescriptorValidation bool
+
+	// TestingSaveFlows, if set, will be called with the given stmt. The resulting
+	// function will be called with the physical plan of that statement's main
+	// query (i.e. no subqueries). The physical plan is only safe for use for the
+	// lifetime of this function. Note that returning a nil function is
+	// unsupported and will lead to a panic.
+	TestingSaveFlows func(stmt string) func(map[roachpb.NodeID]*execinfrapb.FlowSpec) error
+
+	// DeterministicExplainAnalyze, if set, will result in overriding fields in
+	// EXPLAIN ANALYZE (PLAN) that can vary between runs (like elapsed times).
+	DeterministicExplainAnalyze bool
 }
 
 // PGWireTestingKnobs contains knobs for the pgwire module.
@@ -853,62 +870,26 @@ func (k *TenantTestingKnobs) CanSetClusterSettings() bool {
 	return k != nil && k.ClusterSettingsUpdater != nil
 }
 
-// databaseCacheHolder is a thread-safe container for a *Cache.
-// It also allows clients to block until the cache is updated to a desired
-// state.
-//
-// NOTE(andrei): The way in which we handle the database cache is funky: there's
-// this top-level holder, which gets updated on gossip updates. Then, each
-// session gets its *Cache, which is updated from the holder after every
-// transaction - the SystemConfig is updated and the lazily computer map of db
-// names to ids is wiped. So many session are sharing and contending on a
-// mutable cache, but nobody's sharing this holder. We should make up our mind
-// about whether we like the sharing or not and, if we do, share the holder too.
-// Also, we could use the SystemConfigDeltaFilter to limit the updates to
-// databases that chaged. One of the problems with the existing architecture
-// is if a transaction is completed on a session and the session remains dormant
-// for a long time, the next transaction will see a rather old database cache.
-type databaseCacheHolder struct {
-	mu struct {
-		syncutil.Mutex
-		c  *database.Cache
-		cv *sync.Cond
-	}
+// BackupRestoreTestingKnobs contains knobs for backup and restore behavior.
+type BackupRestoreTestingKnobs struct {
+	// AllowImplicitAccess allows implicit access to data sources for non-admin
+	// users. This enables using nodelocal for testing BACKUP/RESTORE permissions.
+	AllowImplicitAccess bool
+
+	// CaptureResolvedTableDescSpans allows for intercepting the spans which are
+	// resolved during backup planning, and will eventually be backed up during
+	// execution.
+	CaptureResolvedTableDescSpans func([]roachpb.Span)
+
+	// RunAfterProcessingRestoreSpanEntry allows blocking the RESTORE job after a
+	// single RestoreSpanEntry has been processed and added to the SSTBatcher.
+	RunAfterProcessingRestoreSpanEntry func(ctx context.Context)
 }
 
-func newDatabaseCacheHolder(c *database.Cache) *databaseCacheHolder {
-	dc := &databaseCacheHolder{}
-	dc.mu.c = c
-	dc.mu.cv = sync.NewCond(&dc.mu.Mutex)
-	return dc
-}
+var _ base.ModuleTestingKnobs = &BackupRestoreTestingKnobs{}
 
-func (dc *databaseCacheHolder) getDatabaseCache() *database.Cache {
-	dc.mu.Lock()
-	defer dc.mu.Unlock()
-	return dc.mu.c
-}
-
-// WaitForCacheState implements the DatabaseCacheSubscriber interface.
-func (dc *databaseCacheHolder) WaitForCacheState(cond func(*database.Cache) bool) {
-	dc.mu.Lock()
-	defer dc.mu.Unlock()
-	for done := cond(dc.mu.c); !done; done = cond(dc.mu.c) {
-		dc.mu.cv.Wait()
-	}
-}
-
-// databaseCacheHolder implements the DatabaseCacheSubscriber interface.
-var _ descs.DatabaseCacheSubscriber = &databaseCacheHolder{}
-
-// updateSystemConfig is called whenever a new system config gossip entry is
-// received.
-func (dc *databaseCacheHolder) updateSystemConfig(cfg *config.SystemConfig) {
-	dc.mu.Lock()
-	dc.mu.c = database.NewCache(dc.mu.c.Codec(), cfg)
-	dc.mu.cv.Broadcast()
-	dc.mu.Unlock()
-}
+// ModuleTestingKnobs implements the base.ModuleTestingKnobs interface.
+func (*BackupRestoreTestingKnobs) ModuleTestingKnobs() {}
 
 func shouldDistributeGivenRecAndMode(
 	rec distRecommendation, mode sessiondata.DistSQLExecMode,
@@ -989,6 +970,7 @@ func golangFillQueryArguments(args ...interface{}) (tree.Datums, error) {
 		// A type switch to handle a few explicit types with special semantics:
 		// - Datums are passed along as is.
 		// - Time datatypes get special representation in the database.
+		// - Usernames are assumed pre-normalized for lookup and validation.
 		var d tree.Datum
 		switch t := arg.(type) {
 		case tree.Datum:
@@ -1007,6 +989,8 @@ func golangFillQueryArguments(args ...interface{}) (tree.Datums, error) {
 			dd := &tree.DDecimal{}
 			dd.Set(t)
 			d = dd
+		case security.SQLUsername:
+			d = tree.NewDString(t.Normalized())
 		}
 		if d == nil {
 			// Handle all types which have an underlying type that can be stored in the
@@ -1174,15 +1158,15 @@ func (p *planner) isAsOf(ctx context.Context, stmt tree.Statement) (*hlc.Timesta
 	return &ts, err
 }
 
-// isSavepoint returns true if stmt is a SAVEPOINT statement.
-func isSavepoint(stmt Statement) bool {
-	_, isSavepoint := stmt.AST.(*tree.Savepoint)
+// isSavepoint returns true if ast is a SAVEPOINT statement.
+func isSavepoint(ast tree.Statement) bool {
+	_, isSavepoint := ast.(*tree.Savepoint)
 	return isSavepoint
 }
 
-// isSetTransaction returns true if stmt is a "SET TRANSACTION ..." statement.
-func isSetTransaction(stmt Statement) bool {
-	_, isSet := stmt.AST.(*tree.SetTransaction)
+// isSetTransaction returns true if ast is a "SET TRANSACTION ..." statement.
+func isSetTransaction(ast tree.Statement) bool {
+	_, isSet := ast.(*tree.SetTransaction)
 	return isSet
 }
 
@@ -1239,12 +1223,12 @@ func (q *queryMeta) cancel() {
 
 // getStatement returns a cleaned version of the query associated
 // with this queryMeta.
-func (q *queryMeta) getStatement() string {
+func (q *queryMeta) getStatement() (tree.Statement, error) {
 	parsed, err := parser.ParseOne(q.rawStmt)
 	if err != nil {
-		return fmt.Sprintf("error retrieving statement: %+v", err)
+		return nil, err
 	}
-	return parsed.AST.String()
+	return parsed.AST, nil
 }
 
 // SessionDefaults mirrors fields in Session, for restoring default
@@ -1253,7 +1237,7 @@ type SessionDefaults map[string]string
 
 // SessionArgs contains arguments for serving a client connection.
 type SessionArgs struct {
-	User            string
+	User            security.SQLUsername
 	SessionDefaults SessionDefaults
 	// RemoteAddr is the client's address. This is nil iff this is an internal
 	// client.
@@ -1287,7 +1271,7 @@ func (r *SessionRegistry) deregister(id ClusterWideID) {
 }
 
 type registrySession interface {
-	user() string
+	user() security.SQLUsername
 	cancelQuery(queryID ClusterWideID) bool
 	cancelSession()
 	// serialize serializes a Session into a serverpb.Session
@@ -1295,8 +1279,9 @@ type registrySession interface {
 	serialize() serverpb.Session
 }
 
-// CancelQuery looks up the associated query in the session registry and cancels it.
-func (r *SessionRegistry) CancelQuery(queryIDStr string, username string) (bool, error) {
+// CancelQuery looks up the associated query in the session registry and cancels
+// it. The caller is responsible for all permission checks.
+func (r *SessionRegistry) CancelQuery(queryIDStr string) (bool, error) {
 	queryID, err := StringToClusterWideID(queryIDStr)
 	if err != nil {
 		return false, fmt.Errorf("query ID %s malformed: %s", queryID, err)
@@ -1306,11 +1291,6 @@ func (r *SessionRegistry) CancelQuery(queryIDStr string, username string) (bool,
 	defer r.Unlock()
 
 	for _, session := range r.sessions {
-		if !(username == security.RootUser || username == session.user()) {
-			// Skip this session.
-			continue
-		}
-
 		if session.cancelQuery(queryID) {
 			return true, nil
 		}
@@ -1319,26 +1299,29 @@ func (r *SessionRegistry) CancelQuery(queryIDStr string, username string) (bool,
 	return false, fmt.Errorf("query ID %s not found", queryID)
 }
 
-// CancelSession looks up the specified session in the session registry and cancels it.
-func (r *SessionRegistry) CancelSession(sessionIDBytes []byte, username string) (bool, error) {
+// CancelSession looks up the specified session in the session registry and
+// cancels it. The caller is responsible for all permission checks.
+func (r *SessionRegistry) CancelSession(
+	sessionIDBytes []byte,
+) (*serverpb.CancelSessionResponse, error) {
+	if len(sessionIDBytes) != 16 {
+		return nil, errors.Errorf("invalid non-16-byte UUID %v", sessionIDBytes)
+	}
 	sessionID := BytesToClusterWideID(sessionIDBytes)
 
 	r.Lock()
 	defer r.Unlock()
 
 	for id, session := range r.sessions {
-		if !(username == security.RootUser || username == session.user()) {
-			// Skip this session.
-			continue
-		}
-
 		if id == sessionID {
 			session.cancelSession()
-			return true, nil
+			return &serverpb.CancelSessionResponse{Canceled: true}, nil
 		}
 	}
 
-	return false, fmt.Errorf("session ID %s not found", sessionID)
+	return &serverpb.CancelSessionResponse{
+		Error: fmt.Sprintf("session ID %s not found", sessionID),
+	}, nil
 }
 
 // SerializeAll returns a slice of all sessions in the registry, converted to serverpb.Sessions.
@@ -1356,11 +1339,7 @@ func (r *SessionRegistry) SerializeAll() []serverpb.Session {
 }
 
 func newSchemaInterface(descsCol *descs.Collection, vs catalog.VirtualSchemas) *schemaInterface {
-	sc := &schemaInterface{
-		physical: accessors.NewCachedAccessor(catalogkv.UncachedPhysicalAccessor{}, descsCol),
-	}
-	sc.logical = accessors.NewLogicalAccessor(sc.physical, vs)
-	return sc
+	return &schemaInterface{logical: accessors.NewLogicalAccessor(descsCol, vs)}
 }
 
 // MaxSQLBytes is the maximum length in bytes of SQL statements serialized
@@ -1428,10 +1407,10 @@ type SessionTracing struct {
 
 	// firstTxnSpan is the span of the first txn that was active when session
 	// tracing was enabled.
-	firstTxnSpan opentracing.Span
+	firstTxnSpan *tracing.Span
 
 	// connSpan is the connection's span. This is recording.
-	connSpan opentracing.Span
+	connSpan *tracing.Span
 
 	// lastRecording will collect the recording when stopping tracing.
 	lastRecording []traceRow
@@ -1449,12 +1428,12 @@ func (st *SessionTracing) getSessionTrace() ([]traceRow, error) {
 }
 
 // getRecording returns the recorded spans of the current trace.
-func (st *SessionTracing) getRecording() []tracing.RecordedSpan {
-	var spans []tracing.RecordedSpan
+func (st *SessionTracing) getRecording() []tracingpb.RecordedSpan {
+	var spans []tracingpb.RecordedSpan
 	if st.firstTxnSpan != nil {
-		spans = append(spans, tracing.GetRecording(st.firstTxnSpan)...)
+		spans = append(spans, st.firstTxnSpan.GetRecording()...)
 	}
-	return append(spans, tracing.GetRecording(st.connSpan)...)
+	return append(spans, st.connSpan.GetRecording()...)
 }
 
 // StartTracing starts "session tracing". From this moment on, everything
@@ -1511,11 +1490,11 @@ func (st *SessionTracing) StartTracing(
 
 	// If we're inside a transaction, start recording on the txn span.
 	if _, ok := st.ex.machine.CurState().(stateNoTxn); !ok {
-		sp := opentracing.SpanFromContext(st.ex.state.Ctx)
+		sp := tracing.SpanFromContext(st.ex.state.Ctx)
 		if sp == nil {
 			return errors.Errorf("no txn span for SessionTracing")
 		}
-		tracing.StartRecording(sp, recType)
+		sp.StartRecording(recType)
 		st.firstTxnSpan = sp
 	}
 
@@ -1527,31 +1506,29 @@ func (st *SessionTracing) StartTracing(
 	// Now hijack the conn's ctx with one that has a recording span.
 
 	opName := "session recording"
-	var sp opentracing.Span
+	var sp *tracing.Span
 	connCtx := st.ex.ctxHolder.connCtx
 
-	// TODO(andrei): use tracing.EnsureChildSpan() or something more efficient
-	// than StartSpan(). The problem is that the current interface doesn't allow
-	// the Recordable option to be passed.
-	if parentSp := opentracing.SpanFromContext(connCtx); parentSp != nil {
+	if parentSp := tracing.SpanFromContext(connCtx); parentSp != nil {
 		// Create a child span while recording.
 		sp = parentSp.Tracer().StartSpan(
 			opName,
-			opentracing.ChildOf(parentSp.Context()), tracing.Recordable,
-			tracing.LogTagsFromCtx(connCtx),
+			tracing.WithParentAndAutoCollection(parentSp),
+			tracing.WithCtxLogTags(connCtx),
+			tracing.WithForceRealSpan(),
 		)
 	} else {
 		// Create a root span while recording.
 		sp = st.ex.server.cfg.AmbientCtx.Tracer.StartSpan(
-			opName, tracing.Recordable,
-			tracing.LogTagsFromCtx(connCtx),
+			opName, tracing.WithForceRealSpan(),
+			tracing.WithCtxLogTags(connCtx),
 		)
 	}
-	tracing.StartRecording(sp, recType)
+	sp.StartRecording(recType)
 	st.connSpan = sp
 
 	// Hijack the connections context.
-	newConnCtx := opentracing.ContextWithSpan(st.ex.ctxHolder.connCtx, sp)
+	newConnCtx := tracing.ContextWithSpan(st.ex.ctxHolder.connCtx, sp)
 	st.ex.ctxHolder.hijack(newConnCtx)
 
 	return nil
@@ -1569,18 +1546,18 @@ func (st *SessionTracing) StopTracing() error {
 	st.showResults = false
 	st.recordingType = tracing.NoRecording
 
-	var spans []tracing.RecordedSpan
+	var spans []tracingpb.RecordedSpan
 
 	if st.firstTxnSpan != nil {
-		spans = append(spans, tracing.GetRecording(st.firstTxnSpan)...)
-		tracing.StopRecording(st.firstTxnSpan)
+		spans = append(spans, st.firstTxnSpan.GetRecording()...)
+		st.firstTxnSpan.StopRecording()
 	}
 	st.connSpan.Finish()
-	spans = append(spans, tracing.GetRecording(st.connSpan)...)
+	spans = append(spans, st.connSpan.GetRecording()...)
 	// NOTE: We're stopping recording on the connection's ctx only; the stopping
 	// is not inherited by children. If we are inside of a txn, that span will
 	// continue recording, even though nobody will collect its recording again.
-	tracing.StopRecording(st.connSpan)
+	st.connSpan.StopRecording()
 	st.ex.ctxHolder.unhijack()
 
 	var err error
@@ -1742,7 +1719,7 @@ var logMessageRE = regexp.MustCompile(
 //
 // Note that what's described above is not the order in which SHOW TRACE FOR SESSION
 // displays the information: SHOW TRACE will sort by the age column.
-func generateSessionTraceVTable(spans []tracing.RecordedSpan) ([]traceRow, error) {
+func generateSessionTraceVTable(spans []tracingpb.RecordedSpan) ([]traceRow, error) {
 	// Get all the log messages, in the right order.
 	var allLogs []logRecordRow
 
@@ -1847,7 +1824,7 @@ func generateSessionTraceVTable(spans []tracing.RecordedSpan) ([]traceRow, error
 // getOrderedChildSpans returns all the spans in allSpans that are children of
 // spanID. It assumes the input is ordered by start time, in which case the
 // output is also ordered.
-func getOrderedChildSpans(spanID uint64, allSpans []tracing.RecordedSpan) []spanWithIndex {
+func getOrderedChildSpans(spanID uint64, allSpans []tracingpb.RecordedSpan) []spanWithIndex {
 	children := make([]spanWithIndex, 0)
 	for i := range allSpans {
 		if allSpans[i].ParentSpanID == spanID {
@@ -1869,7 +1846,7 @@ func getOrderedChildSpans(spanID uint64, allSpans []tracing.RecordedSpan) []span
 // seenSpans is modified to record all the spans that are part of the subtrace
 // rooted at span.
 func getMessagesForSubtrace(
-	span spanWithIndex, allSpans []tracing.RecordedSpan, seenSpans map[uint64]struct{},
+	span spanWithIndex, allSpans []tracingpb.RecordedSpan, seenSpans map[uint64]struct{},
 ) ([]logRecordRow, error) {
 	if _, ok := seenSpans[span.SpanID]; ok {
 		return nil, errors.Errorf("duplicate span %d", span.SpanID)
@@ -1956,14 +1933,14 @@ type logRecordRow struct {
 }
 
 type spanWithIndex struct {
-	*tracing.RecordedSpan
+	*tracingpb.RecordedSpan
 	index int
 }
 
 // paramStatusUpdater is a subset of RestrictedCommandResult which allows sending
 // status updates.
 type paramStatusUpdater interface {
-	AppendParamStatusUpdate(string, string)
+	BufferParamStatusUpdate(string, string)
 }
 
 // noopParamStatusUpdater implements paramStatusUpdater by performing a no-op.
@@ -1971,7 +1948,7 @@ type noopParamStatusUpdater struct{}
 
 var _ paramStatusUpdater = (*noopParamStatusUpdater)(nil)
 
-func (noopParamStatusUpdater) AppendParamStatusUpdate(string, string) {}
+func (noopParamStatusUpdater) BufferParamStatusUpdate(string, string) {}
 
 // sessionDataMutator is the interface used by sessionVars to change the session
 // state. It mostly mutates the Session's SessionData, but not exclusively (e.g.
@@ -2010,15 +1987,15 @@ func (m *sessionDataMutator) notifyOnDataChangeListeners(key string, val string)
 func (m *sessionDataMutator) SetApplicationName(appName string) {
 	m.data.ApplicationName = appName
 	m.notifyOnDataChangeListeners("application_name", appName)
-	m.paramStatusUpdater.AppendParamStatusUpdate("application_name", appName)
+	m.paramStatusUpdater.BufferParamStatusUpdate("application_name", appName)
 }
 
-func (m *sessionDataMutator) SetBytesEncodeFormat(val lex.BytesEncodeFormat) {
-	m.data.DataConversion.BytesEncodeFormat = val
+func (m *sessionDataMutator) SetBytesEncodeFormat(val sessiondatapb.BytesEncodeFormat) {
+	m.data.DataConversionConfig.BytesEncodeFormat = val
 }
 
-func (m *sessionDataMutator) SetExtraFloatDigits(val int) {
-	m.data.DataConversion.ExtraFloatDigits = val
+func (m *sessionDataMutator) SetExtraFloatDigits(val int32) {
+	m.data.DataConversionConfig.ExtraFloatDigits = val
 }
 
 func (m *sessionDataMutator) SetDatabase(dbName string) {
@@ -2030,7 +2007,14 @@ func (m *sessionDataMutator) SetTemporarySchemaName(scName string) {
 	m.data.SearchPath = m.data.SearchPath.WithTemporarySchemaName(scName)
 }
 
-func (m *sessionDataMutator) SetDefaultIntSize(size int) {
+func (m *sessionDataMutator) SetTemporarySchemaIDForDatabase(dbID uint32, tempSchemaID uint32) {
+	if m.data.DatabaseIDToTempSchemaID == nil {
+		m.data.DatabaseIDToTempSchemaID = make(map[uint32]uint32)
+	}
+	m.data.DatabaseIDToTempSchemaID[dbID] = tempSchemaID
+}
+
+func (m *sessionDataMutator) SetDefaultIntSize(size int32) {
 	m.data.DefaultIntSize = size
 }
 
@@ -2062,14 +2046,6 @@ func (m *sessionDataMutator) SetZigzagJoinEnabled(val bool) {
 	m.data.ZigzagJoinEnabled = val
 }
 
-func (m *sessionDataMutator) SetEnumsEnabled(val bool) {
-	m.data.EnumsEnabled = val
-}
-
-func (m *sessionDataMutator) SetUserDefinedSchemasEnabled(val bool) {
-	m.data.UserDefinedSchemasEnabled = val
-}
-
 func (m *sessionDataMutator) SetExperimentalDistSQLPlanning(
 	val sessiondata.ExperimentalDistSQLPlanningMode,
 ) {
@@ -2088,12 +2064,16 @@ func (m *sessionDataMutator) SetReorderJoinsLimit(val int) {
 	m.data.ReorderJoinsLimit = val
 }
 
-func (m *sessionDataMutator) SetVectorize(val sessiondata.VectorizeExecMode) {
+func (m *sessionDataMutator) SetVectorize(val sessiondatapb.VectorizeExecMode) {
 	m.data.VectorizeMode = val
 }
 
 func (m *sessionDataMutator) SetVectorizeRowCountThreshold(val uint64) {
 	m.data.VectorizeRowCountThreshold = val
+}
+
+func (m *sessionDataMutator) SetTestingVectorizeInjectPanics(val bool) {
+	m.data.TestingVectorizeInjectPanics = val
 }
 
 func (m *sessionDataMutator) SetOptimizerFKCascadesLimit(val int) {
@@ -2108,21 +2088,12 @@ func (m *sessionDataMutator) SetOptimizerUseMultiColStats(val bool) {
 	m.data.OptimizerUseMultiColStats = val
 }
 
-// TODO(mgartner): remove this once partial indexes are fully supported.
-func (m *sessionDataMutator) SetPartialIndexes(val bool) {
-	m.data.PartialIndexes = val
-}
-
 func (m *sessionDataMutator) SetImplicitSelectForUpdate(val bool) {
 	m.data.ImplicitSelectForUpdate = val
 }
 
 func (m *sessionDataMutator) SetInsertFastPath(val bool) {
 	m.data.InsertFastPath = val
-}
-
-func (m *sessionDataMutator) SetInterleavedJoins(val bool) {
-	m.data.InterleavedJoins = val
 }
 
 func (m *sessionDataMutator) SetSerialNormalizationMode(val sessiondata.SerialNormalizationMode) {
@@ -2133,13 +2104,17 @@ func (m *sessionDataMutator) SetSafeUpdates(val bool) {
 	m.data.SafeUpdates = val
 }
 
+func (m *sessionDataMutator) SetPreferLookupJoinsForFKs(val bool) {
+	m.data.PreferLookupJoinsForFKs = val
+}
+
 func (m *sessionDataMutator) UpdateSearchPath(paths []string) {
 	m.data.SearchPath = m.data.SearchPath.UpdatePaths(paths)
 }
 
 func (m *sessionDataMutator) SetLocation(loc *time.Location) {
-	m.data.DataConversion.Location = loc
-	m.paramStatusUpdater.AppendParamStatusUpdate("TimeZone", sessionDataTimeZoneFormat(loc))
+	m.data.Location = loc
+	m.paramStatusUpdater.BufferParamStatusUpdate("TimeZone", sessionDataTimeZoneFormat(loc))
 }
 
 func (m *sessionDataMutator) SetReadOnly(val bool) {
@@ -2162,6 +2137,10 @@ func (m *sessionDataMutator) SetIdleInSessionTimeout(timeout time.Duration) {
 	m.data.IdleInSessionTimeout = timeout
 }
 
+func (m *sessionDataMutator) SetIdleInTransactionSessionTimeout(timeout time.Duration) {
+	m.data.IdleInTransactionSessionTimeout = timeout
+}
+
 func (m *sessionDataMutator) SetAllowPrepareAsOptPlan(val bool) {
 	m.data.AllowPrepareAsOptPlan = val
 }
@@ -2178,8 +2157,18 @@ func (m *sessionDataMutator) SetHashShardedIndexesEnabled(val bool) {
 	m.data.HashShardedIndexesEnabled = val
 }
 
+func (m *sessionDataMutator) SetDisallowFullTableScans(val bool) {
+	m.data.DisallowFullTableScans = val
+}
+
 func (m *sessionDataMutator) SetAlterColumnTypeGeneral(val bool) {
 	m.data.AlterColumnTypeGeneralEnabled = val
+}
+
+// TODO(mgartner): remove this once multi-column inverted indexes are fully
+// supported.
+func (m *sessionDataMutator) SetMutliColumnInvertedIndexes(val bool) {
+	m.data.EnableMultiColumnInvertedIndexes = val
 }
 
 // RecordLatestSequenceValue records that value to which the session incremented
@@ -2220,7 +2209,8 @@ func newSQLStatsCollector(
 }
 
 // recordStatement records stats for one statement. samplePlanDescription can
-// be nil, as these are only sampled periodically per unique fingerprint.
+// be nil, as these are only sampled periodically per unique fingerprint. It
+// returns the statement ID of the recorded statement.
 func (s *sqlStatsCollector) recordStatement(
 	stmt *Statement,
 	samplePlanDescription *roachpb.ExplainTreePlanNode,
@@ -2232,17 +2222,29 @@ func (s *sqlStatsCollector) recordStatement(
 	err error,
 	parseLat, planLat, runLat, svcLat, ovhLat float64,
 	stats topLevelQueryStats,
-) {
-	s.appStats.recordStatement(
+) roachpb.StmtID {
+	return s.appStats.recordStatement(
 		stmt, samplePlanDescription, distSQLUsed, vectorized, implicitTxn,
 		automaticRetryCount, numRows, err, parseLat, planLat, runLat, svcLat,
 		ovhLat, stats,
 	)
 }
 
-// recordTransaction records stats for one transaction.
-func (s *sqlStatsCollector) recordTransaction(txnTimeSec float64, ev txnEvent, implicit bool) {
-	s.appStats.recordTransaction(txnTimeSec, ev, implicit)
+// recordTransaction records statistics for one transaction.
+func (s *sqlStatsCollector) recordTransaction(
+	key txnKey,
+	txnTimeSec float64,
+	ev txnEvent,
+	implicit bool,
+	retryCount int,
+	statementIDs []roachpb.StmtID,
+	serviceLat time.Duration,
+	retryLat time.Duration,
+	commitLat time.Duration,
+	numRows int,
+) {
+	s.appStats.recordTransactionCounts(txnTimeSec, ev, implicit)
+	s.appStats.recordTransaction(key, int64(retryCount), statementIDs, serviceLat, retryLat, commitLat, numRows)
 }
 
 func (s *sqlStatsCollector) reset(sqlStats *sqlStats, appStats *appStats, phaseTimes *phaseTimes) {

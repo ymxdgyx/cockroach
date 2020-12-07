@@ -37,6 +37,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/stdstrings"
@@ -52,6 +54,9 @@ import (
 //       Only run the test file if the server is in the specified
 //       security mode. (The default is `config secure insecure` i.e.
 //       the test file is applicable to both.)
+//
+// accept_sql_without_tls
+//       Enable TCP connections without TLS in secure mode.
 //
 // set_hba
 // <hba config>
@@ -106,6 +111,7 @@ import (
 //
 func TestAuthenticationAndHBARules(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	skip.UnderRace(t, "takes >1min under race")
 
 	testutils.RunTrueAndFalse(t, "insecure", func(t *testing.T, insecure bool) {
 		hbaRunTest(t, insecure)
@@ -141,13 +147,37 @@ func hbaRunTest(t *testing.T, insecure bool) {
 	if !insecure {
 		httpScheme = "https://"
 	}
+
 	datadriven.Walk(t, "testdata/auth", func(t *testing.T, path string) {
+		defer leaktest.AfterTest(t)()
+
 		maybeSocketDir, maybeSocketFile, cleanup := makeSocketFile(t)
 		defer cleanup()
 
 		// We really need to have the logs go to files, so that -show-logs
 		// does not break the "authlog" directives.
-		defer log.ScopeWithoutShowLogs(t).Close(t)
+		sc := log.ScopeWithoutShowLogs(t)
+		defer sc.Close(t)
+
+		// Enable logging channels.
+		log.TestingResetActive()
+		cfg := logconfig.DefaultConfig()
+		// Make a sink for just the session log.
+		bt := true
+		cfg.Sinks.FileGroups = map[string]*logconfig.FileConfig{
+			"auth": {
+				CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &bt},
+				Channels:         logconfig.ChannelList{Channels: []log.Channel{channel.SESSIONS}},
+			}}
+		dir := sc.GetDirectory()
+		if err := cfg.Validate(&dir); err != nil {
+			t.Fatal(err)
+		}
+		cleanup, err := log.ApplyConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
 
 		s, conn, _ := serverutils.StartServer(t,
 			base.TestServerArgs{Insecure: insecure, SocketFile: maybeSocketFile})
@@ -156,7 +186,8 @@ func hbaRunTest(t *testing.T, insecure bool) {
 		// Enable conn/auth logging.
 		// We can't use the cluster settings to do this, because
 		// cluster settings propagate asynchronously.
-		s.(*server.TestServer).PGServer().TestingEnableConnAuthLogging()
+		testServer := s.(*server.TestServer)
+		testServer.PGServer().TestingEnableConnAuthLogging()
 
 		pgServer := s.(*server.TestServer).PGServer()
 
@@ -166,7 +197,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 		}
 		httpHBAUrl := httpScheme + s.HTTPAddr() + "/debug/hba_conf"
 
-		if _, err := conn.ExecContext(context.Background(), `CREATE USER $1`, server.TestUser); err != nil {
+		if _, err := conn.ExecContext(context.Background(), `CREATE USER $1`, security.TestUser); err != nil {
 			t.Fatal(err)
 		}
 
@@ -188,6 +219,9 @@ func hbaRunTest(t *testing.T, insecure bool) {
 					if !allowed {
 						skip.IgnoreLint(t, "Test file not applicable at this security level.")
 					}
+
+				case "accept_sql_without_tls":
+					testServer.Cfg.AcceptSQLWithoutTLS = true
 
 				case "set_hba":
 					_, err := conn.ExecContext(context.Background(),
@@ -250,7 +284,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 					var buf strings.Builder
 					if err := testutils.SucceedsSoonError(func() error {
 						buf.Reset()
-						t.Logf("attempting to scan logs...")
+						// t.Logf("attempting to scan logs...")
 
 						// Note: even though FetchEntriesFromFiles advertises a mechanism
 						// to filter entries by timestamp or just retrieve the last N entries,
@@ -258,7 +292,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 						// See: https://github.com/cockroachdb/cockroach/issues/45745
 						// So instead we need to do the filtering ourselves.
 						entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 10000, authLogFileRe,
-							log.WithFlattenedSensitiveData)
+							log.WithMarkedSensitiveData)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -272,7 +306,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 							}
 							for ; i >= 0; i-- {
 								entry := &entries[i]
-								t.Logf("found log entry: %+v", *entry)
+								// t.Logf("found log entry: %+v", *entry)
 
 								// The tag part is going to contain a client address, with a random port number.
 								// To make the test deterministic, erase the random part.
@@ -314,7 +348,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 					// However, certs are only generated for users "root" and "testuser" specifically.
 					sqlURL, cleanupFn := sqlutils.PGUrlWithOptionalClientCerts(
 						t, s.ServingSQLAddr(), t.Name(), url.User(user),
-						user == security.RootUser || user == server.TestUser /* withClientCerts */)
+						user == security.RootUser || user == security.TestUser /* withClientCerts */)
 					defer cleanupFn()
 
 					var host, port string

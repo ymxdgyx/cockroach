@@ -16,9 +16,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -34,6 +35,14 @@ type dropViewNode struct {
 //   Notes: postgres allows only the view owner to DROP a view.
 //          mysql requires the DROP privilege on the view.
 func (p *planner) DropView(ctx context.Context, n *tree.DropView) (planNode, error) {
+	if err := checkSchemaChangeEnabled(
+		ctx,
+		&p.ExecCfg().Settings.SV,
+		"DROP VIEW",
+	); err != nil {
+		return nil, err
+	}
+
 	td := make([]toDelete, 0, len(n.Names))
 	for i := range n.Names {
 		tn := &n.Names[i]
@@ -44,6 +53,9 @@ func (p *planner) DropView(ctx context.Context, n *tree.DropView) (planNode, err
 		if droppedDesc == nil {
 			// IfExists specified and the view did not exist.
 			continue
+		}
+		if err := checkViewMatchesMaterialized(droppedDesc, true /* requireView */, n.IsMaterialized); err != nil {
+			return nil, err
 		}
 
 		td = append(td, toDelete{tn, droppedDesc})
@@ -107,7 +119,7 @@ func (n *dropViewNode) startExec(params runParams) error {
 				Statement           string
 				User                string
 				CascadeDroppedViews []string
-			}{toDel.tn.FQString(), n.n.String(), params.SessionData().User, cascadeDroppedViews},
+			}{toDel.tn.FQString(), n.n.String(), params.p.User().Normalized(), cascadeDroppedViews},
 		); err != nil {
 			return err
 		}
@@ -130,7 +142,7 @@ func descInSlice(descID descpb.ID, td []toDelete) bool {
 
 func (p *planner) canRemoveDependentView(
 	ctx context.Context,
-	from *sqlbase.MutableTableDescriptor,
+	from *tabledesc.Mutable,
 	ref descpb.TableDescriptor_Reference,
 	behavior tree.DropBehavior,
 ) error {
@@ -165,7 +177,7 @@ func (p *planner) canRemoveDependentViewGeneric(
 // Returns the names of any additional views that were also dropped
 // due to `cascade` behavior.
 func (p *planner) removeDependentView(
-	ctx context.Context, tableDesc, viewDesc *sqlbase.MutableTableDescriptor, jobDesc string,
+	ctx context.Context, tableDesc, viewDesc *tabledesc.Mutable, jobDesc string,
 ) ([]string, error) {
 	// In the table whose index is being removed, filter out all back-references
 	// that refer to the view that's being removed.
@@ -179,7 +191,7 @@ func (p *planner) removeDependentView(
 // were also dropped due to `cascade` behavior.
 func (p *planner) dropViewImpl(
 	ctx context.Context,
-	viewDesc *sqlbase.MutableTableDescriptor,
+	viewDesc *tabledesc.Mutable,
 	queueJob bool,
 	jobDesc string,
 	behavior tree.DropBehavior,
@@ -244,7 +256,7 @@ func (p *planner) getViewDescForCascade(
 	objName string,
 	parentID, viewID descpb.ID,
 	behavior tree.DropBehavior,
-) (*sqlbase.MutableTableDescriptor, error) {
+) (*tabledesc.Mutable, error) {
 	viewDesc, err := p.Descriptors().GetMutableTableVersionByID(ctx, viewID, p.txn)
 	if err != nil {
 		log.Warningf(ctx, "unable to retrieve descriptor for view %d: %v", viewID, err)
@@ -257,13 +269,13 @@ func (p *planner) getViewDescForCascade(
 			viewFQName, err := p.getQualifiedTableName(ctx, viewDesc)
 			if err != nil {
 				log.Warningf(ctx, "unable to retrieve qualified name of view %d: %v", viewID, err)
-				return nil, sqlbase.NewDependentObjectErrorf(
+				return nil, sqlerrors.NewDependentObjectErrorf(
 					"cannot drop %s %q because a view depends on it", typeName, objName)
 			}
 			viewName = viewFQName.FQString()
 		}
 		return nil, errors.WithHintf(
-			sqlbase.NewDependentObjectErrorf("cannot drop %s %q because view %q depends on it",
+			sqlerrors.NewDependentObjectErrorf("cannot drop %s %q because view %q depends on it",
 				typeName, objName, viewName),
 			"you can drop %s instead.", viewName)
 	}

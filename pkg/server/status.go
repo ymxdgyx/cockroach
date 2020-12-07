@@ -40,7 +40,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -51,23 +52,24 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 	gwruntime "github.com/grpc-ecosystem/grpc-gateway/runtime"
-	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	grpcstatus "google.golang.org/grpc/status"
 )
 
 const (
@@ -101,7 +103,7 @@ var (
 
 	// Error used to convey that remote debugging is needs to be enabled for an
 	// endpoint to be usable.
-	remoteDebuggingErr = grpcstatus.Error(
+	remoteDebuggingErr = status.Error(
 		codes.PermissionDenied, "not allowed (due to the 'server.remote_debugging.mode' setting)")
 
 	// Counter to count accesses to the prometheus vars endpoint /_status/vars .
@@ -123,22 +125,183 @@ func propagateGatewayMetadata(ctx context.Context) context.Context {
 	return ctx
 }
 
+// baseStatusServer implements functionality shared by the tenantStatusServer
+// and the full statusServer.
+type baseStatusServer struct {
+	log.AmbientContext
+	privilegeChecker *adminPrivilegeChecker
+	sessionRegistry  *sql.SessionRegistry
+	st               *cluster.Settings
+}
+
+// getLocalSessions returns a list of local sessions on this node. Note that the
+// NodeID field is unset.
+func (b *baseStatusServer) getLocalSessions(
+	ctx context.Context, req *serverpb.ListSessionsRequest,
+) ([]serverpb.Session, error) {
+	ctx = propagateGatewayMetadata(ctx)
+	ctx = b.AnnotateCtx(ctx)
+
+	sessionUser, isAdmin, err := b.privilegeChecker.getUserAndRole(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	hasViewActivity, err := b.privilegeChecker.hasRoleOption(ctx, sessionUser, roleoption.VIEWACTIVITY)
+	if err != nil {
+		return nil, err
+	}
+
+	reqUsername, err := security.MakeSQLUsernameFromPreNormalizedStringChecked(req.Username)
+	if err != nil {
+		return nil, err
+	}
+
+	if !isAdmin && !hasViewActivity {
+		// For non-superusers, requests with an empty username is
+		// implicitly a request for the client's own sessions.
+		if reqUsername.Undefined() {
+			reqUsername = sessionUser
+		}
+
+		// Non-superusers are not allowed to query sessions others than their own.
+		if sessionUser != reqUsername {
+			return nil, status.Errorf(
+				codes.PermissionDenied,
+				"client user %q does not have permission to view sessions from user %q",
+				sessionUser, reqUsername)
+		}
+	}
+
+	// The empty username means "all sessions".
+	showAll := reqUsername.Undefined()
+
+	registry := b.sessionRegistry
+	sessions := registry.SerializeAll()
+	userSessions := make([]serverpb.Session, 0, len(sessions))
+
+	for _, session := range sessions {
+		if reqUsername.Normalized() != session.Username && !showAll {
+			continue
+		}
+
+		userSessions = append(userSessions, session)
+	}
+	return userSessions, nil
+}
+
+type sessionFinder func(sessions []serverpb.Session) (serverpb.Session, error)
+
+func findSessionBySessionID(sessionID []byte) sessionFinder {
+	return func(sessions []serverpb.Session) (serverpb.Session, error) {
+		var session serverpb.Session
+		for _, s := range sessions {
+			if bytes.Equal(sessionID, s.ID) {
+				session = s
+				break
+			}
+		}
+		if len(session.ID) == 0 {
+			return session, fmt.Errorf("session ID %s not found", sql.BytesToClusterWideID(sessionID))
+		}
+		return session, nil
+	}
+}
+
+func findSessionByQueryID(queryID string) sessionFinder {
+	return func(sessions []serverpb.Session) (serverpb.Session, error) {
+		var session serverpb.Session
+		for _, s := range sessions {
+			for _, q := range s.ActiveQueries {
+				if queryID == q.ID {
+					session = s
+					break
+				}
+			}
+		}
+		if len(session.ID) == 0 {
+			return session, fmt.Errorf("query ID %s not found", queryID)
+		}
+		return session, nil
+	}
+}
+
+func (b *baseStatusServer) checkCancelPrivilege(
+	ctx context.Context, username security.SQLUsername, findSession sessionFinder,
+) error {
+	ctx = propagateGatewayMetadata(ctx)
+	ctx = b.AnnotateCtx(ctx)
+	// reqUser is the user who made the cancellation request.
+	var reqUser security.SQLUsername
+	{
+		sessionUser, isAdmin, err := b.privilegeChecker.getUserAndRole(ctx)
+		if err != nil {
+			return err
+		}
+		if username.Undefined() || username == sessionUser {
+			reqUser = sessionUser
+		} else {
+			// When CANCEL QUERY is run as a SQL statement, sessionUser is always root
+			// and the user who ran the statement is passed as req.Username.
+			if !isAdmin {
+				return errRequiresAdmin
+			}
+			reqUser = username
+		}
+	}
+
+	hasAdmin, err := b.privilegeChecker.hasAdminRole(ctx, reqUser)
+	if err != nil {
+		return err
+	}
+
+	if !hasAdmin {
+		// Check if the user has permission to see the session.
+		session, err := findSession(b.sessionRegistry.SerializeAll())
+		if err != nil {
+			return err
+		}
+
+		sessionUser := security.MakeSQLUsernameFromPreNormalizedString(session.Username)
+		if sessionUser != reqUser {
+			// Must have CANCELQUERY privilege to cancel other users'
+			// sessions/queries.
+			ok, err := b.privilegeChecker.hasRoleOption(ctx, reqUser, roleoption.CANCELQUERY)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return errRequiresRoleOption(roleoption.CANCELQUERY)
+			}
+			// Non-admins cannot cancel admins' sessions/queries.
+			isAdminSession, err := b.privilegeChecker.hasAdminRole(ctx, sessionUser)
+			if err != nil {
+				return err
+			}
+			if isAdminSession {
+				return status.Error(
+					codes.PermissionDenied, "permission denied to cancel admin session")
+			}
+		}
+	}
+
+	return nil
+}
+
 // A statusServer provides a RESTful status API.
 type statusServer struct {
-	log.AmbientContext
+	*baseStatusServer
 
-	st                       *cluster.Settings
 	cfg                      *base.Config
 	admin                    *adminServer
 	db                       *kv.DB
 	gossip                   *gossip.Gossip
 	metricSource             metricMarshaler
-	nodeLiveness             *kvserver.NodeLiveness
+	nodeLiveness             *liveness.NodeLiveness
 	storePool                *kvserver.StorePool
 	rpcCtx                   *rpc.Context
 	stores                   *kvserver.Stores
 	stopper                  *stop.Stopper
-	sessionRegistry          *sql.SessionRegistry
 	si                       systemInfoOnce
 	stmtDiagnosticsRequester StmtDiagnosticsRequester
 	internalExecutor         *sql.InternalExecutor
@@ -164,7 +327,7 @@ func newStatusServer(
 	db *kv.DB,
 	gossip *gossip.Gossip,
 	metricSource metricMarshaler,
-	nodeLiveness *kvserver.NodeLiveness,
+	nodeLiveness *liveness.NodeLiveness,
 	storePool *kvserver.StorePool,
 	rpcCtx *rpc.Context,
 	stores *kvserver.Stores,
@@ -174,8 +337,12 @@ func newStatusServer(
 ) *statusServer {
 	ambient.AddLogTag("status", nil)
 	server := &statusServer{
-		AmbientContext:   ambient,
-		st:               st,
+		baseStatusServer: &baseStatusServer{
+			AmbientContext:   ambient,
+			privilegeChecker: adminServer.adminPrivilegeChecker,
+			sessionRegistry:  sessionRegistry,
+			st:               st,
+		},
 		cfg:              cfg,
 		admin:            adminServer,
 		db:               db,
@@ -186,7 +353,6 @@ func newStatusServer(
 		rpcCtx:           rpcCtx,
 		stores:           stores,
 		stopper:          stopper,
-		sessionRegistry:  sessionRegistry,
 		internalExecutor: internalExecutor,
 	}
 
@@ -223,7 +389,7 @@ func (s *statusServer) parseNodeID(nodeIDParam string) (roachpb.NodeID, bool, er
 
 	id, err := strconv.ParseInt(nodeIDParam, 0, 32)
 	if err != nil {
-		return 0, false, errors.Wrap(err, "node id could not be parsed")
+		return 0, false, errors.Wrap(err, "node ID could not be parsed")
 	}
 	nodeID := roachpb.NodeID(id)
 	return nodeID, nodeID == s.gossip.NodeID.Get(), nil
@@ -251,7 +417,7 @@ func (s *statusServer) Gossip(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
@@ -261,7 +427,7 @@ func (s *statusServer) Gossip(
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if local {
@@ -281,13 +447,13 @@ func (s *statusServer) EngineStats(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -306,15 +472,6 @@ func (s *statusServer) EngineStats(
 			EngineType:           store.Engine().Type(),
 		}
 
-		switch e := store.Engine().(type) {
-		case *storage.RocksDB:
-			tickersAndHistograms, err := e.GetTickersAndHistograms()
-			if err != nil {
-				return grpcstatus.Errorf(codes.Internal, err.Error())
-			}
-			engineStatsInfo.TickersAndHistograms = tickersAndHistograms
-		}
-
 		resp.Stats = append(resp.Stats, engineStatsInfo)
 		return nil
 	})
@@ -331,7 +488,7 @@ func (s *statusServer) Allocator(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
@@ -343,7 +500,7 @@ func (s *statusServer) Allocator(
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -361,26 +518,26 @@ func (s *statusServer) Allocator(
 			// Use IterateRangeDescriptors to read from the engine only
 			// because it's already exported.
 			err := kvserver.IterateRangeDescriptors(ctx, store.Engine(),
-				func(desc roachpb.RangeDescriptor) (bool, error) {
+				func(desc roachpb.RangeDescriptor) error {
 					rep, err := store.GetReplica(desc.RangeID)
 					if err != nil {
 						if errors.HasType(err, (*roachpb.RangeNotFoundError)(nil)) {
-							return true, nil // continue
+							return nil // continue
 						}
-						return true, err
+						return err
 					}
 					if !rep.OwnsValidLease(ctx, store.Clock().Now()) {
-						return false, nil
+						return nil
 					}
 					allocatorSpans, err := store.AllocatorDryRun(ctx, rep)
 					if err != nil {
-						return true, err
+						return err
 					}
 					output.DryRuns = append(output.DryRuns, &serverpb.AllocatorDryRun{
 						RangeID: desc.RangeID,
 						Events:  recordedSpansToTraceEvents(allocatorSpans),
 					})
-					return false, nil
+					return nil
 				})
 			return err
 		}
@@ -407,12 +564,12 @@ func (s *statusServer) Allocator(
 		return nil
 	})
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.Internal, err.Error())
+		return nil, status.Errorf(codes.Internal, err.Error())
 	}
 	return output, nil
 }
 
-func recordedSpansToTraceEvents(spans []tracing.RecordedSpan) []*serverpb.TraceEvent {
+func recordedSpansToTraceEvents(spans []tracingpb.RecordedSpan) []*serverpb.TraceEvent {
 	var output []*serverpb.TraceEvent
 	var buf bytes.Buffer
 	for _, sp := range spans {
@@ -445,7 +602,7 @@ func (s *statusServer) AllocatorRange(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
@@ -493,7 +650,7 @@ func (s *statusServer) AllocatorRange(
 					return nil
 				})
 			}); err != nil {
-			return nil, grpcstatus.Errorf(codes.Internal, err.Error())
+			return nil, status.Errorf(codes.Internal, err.Error())
 		}
 	}
 
@@ -512,7 +669,7 @@ func (s *statusServer) AllocatorRange(
 				}, nil
 			}
 		case <-ctx.Done():
-			return nil, grpcstatus.Errorf(codes.DeadlineExceeded, "request timed out")
+			return nil, status.Errorf(codes.DeadlineExceeded, "request timed out")
 		}
 	}
 
@@ -527,7 +684,7 @@ func (s *statusServer) AllocatorRange(
 			}
 			fmt.Fprintf(&buf, "n%d: %s", nodeID, err)
 		}
-		return nil, grpcstatus.Errorf(codes.Internal, buf.String())
+		return nil, status.Errorf(codes.Internal, buf.String())
 	}
 	return &serverpb.AllocatorRangeResponse{}, nil
 }
@@ -539,13 +696,13 @@ func (s *statusServer) Certificates(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if s.cfg.Insecure {
@@ -659,13 +816,13 @@ func (s *statusServer) Details(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 	if !local {
 		status, err := s.dialNode(ctx, nodeID)
@@ -698,7 +855,7 @@ func (s *statusServer) GetFiles(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
@@ -708,7 +865,7 @@ func (s *statusServer) GetFiles(
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 	if !local {
 		status, err := s.dialNode(ctx, nodeID)
@@ -727,19 +884,19 @@ func (s *statusServer) GetFiles(
 	case serverpb.FileType_GOROUTINES: // Requesting for saved Goroutine dumps.
 		dir = s.admin.server.cfg.GoroutineDumpDirName
 	default:
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, "unknown file type: %s", req.Type)
+		return nil, status.Errorf(codes.InvalidArgument, "unknown file type: %s", req.Type)
 	}
 	if dir == "" {
-		return nil, grpcstatus.Errorf(codes.Unimplemented, "dump directory not configured: %s", req.Type)
+		return nil, status.Errorf(codes.Unimplemented, "dump directory not configured: %s", req.Type)
 	}
 	var resp serverpb.GetFilesResponse
 	for _, pattern := range req.Patterns {
 		if err := checkFilePattern(pattern); err != nil {
-			return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+			return nil, status.Errorf(codes.InvalidArgument, err.Error())
 		}
 		filepaths, err := filepath.Glob(filepath.Join(dir, pattern))
 		if err != nil {
-			return nil, grpcstatus.Errorf(codes.InvalidArgument, "bad pattern: %s", pattern)
+			return nil, status.Errorf(codes.InvalidArgument, "bad pattern: %s", pattern)
 		}
 
 		for _, path := range filepaths {
@@ -748,7 +905,7 @@ func (s *statusServer) GetFiles(
 			if !req.ListOnly {
 				contents, err = ioutil.ReadFile(path)
 				if err != nil {
-					return nil, grpcstatus.Errorf(codes.Internal, err.Error())
+					return nil, status.Errorf(codes.Internal, err.Error())
 				}
 			}
 			resp.Files = append(resp.Files,
@@ -774,13 +931,13 @@ func (s *statusServer) LogFilesList(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 	if !local {
 		status, err := s.dialNode(ctx, nodeID)
@@ -804,7 +961,7 @@ func (s *statusServer) LogFile(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
@@ -814,7 +971,7 @@ func (s *statusServer) LogFile(
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 	if !local {
 		status, err := s.dialNode(ctx, nodeID)
@@ -825,7 +982,7 @@ func (s *statusServer) LogFile(
 	}
 
 	// Determine how to redact.
-	inputEditMode := log.SelectEditMode(req.Redact, req.KeepRedactable)
+	inputEditMode := log.SelectEditMode(req.Redact, log.KeepRedactable)
 
 	// Ensure that the latest log entries are available in files.
 	log.Flush()
@@ -837,10 +994,10 @@ func (s *statusServer) LogFile(
 	}
 	defer reader.Close()
 
-	var entry log.Entry
 	var resp serverpb.LogEntriesResponse
 	decoder := log.NewEntryDecoder(reader, inputEditMode)
 	for {
+		var entry logpb.Entry
 		if err := decoder.Decode(&entry); err != nil {
 			if err == io.EOF {
 				break
@@ -848,13 +1005,6 @@ func (s *statusServer) LogFile(
 			return nil, err
 		}
 		resp.Entries = append(resp.Entries, entry)
-	}
-
-	// Erase the redactable bit if requested by client.
-	if !req.KeepRedactable {
-		for i := range resp.Entries {
-			resp.Entries[i].Redactable = false
-		}
 	}
 
 	return &resp, nil
@@ -897,7 +1047,7 @@ func (s *statusServer) Logs(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
@@ -907,7 +1057,7 @@ func (s *statusServer) Logs(
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 	if !local {
 		status, err := s.dialNode(ctx, nodeID)
@@ -918,37 +1068,37 @@ func (s *statusServer) Logs(
 	}
 
 	// Determine how to redact.
-	inputEditMode := log.SelectEditMode(req.Redact, req.KeepRedactable)
+	inputEditMode := log.SelectEditMode(req.Redact, log.KeepRedactable)
 
 	// Select the time interval.
 	startTimestamp, err := parseInt64WithDefault(
 		req.StartTime,
 		timeutil.Now().AddDate(0, 0, -1).UnixNano())
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, "StartTime could not be parsed: %s", err)
+		return nil, status.Errorf(codes.InvalidArgument, "StartTime could not be parsed: %s", err)
 	}
 
 	endTimestamp, err := parseInt64WithDefault(req.EndTime, timeutil.Now().UnixNano())
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, "EndTime could not be parsed: %s", err)
+		return nil, status.Errorf(codes.InvalidArgument, "EndTime could not be parsed: %s", err)
 	}
 
 	if startTimestamp > endTimestamp {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, "StartTime: %d should not be greater than endtime: %d", startTimestamp, endTimestamp)
+		return nil, status.Errorf(codes.InvalidArgument, "StartTime: %d should not be greater than endtime: %d", startTimestamp, endTimestamp)
 	}
 
 	maxEntries, err := parseInt64WithDefault(req.Max, defaultMaxLogEntries)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, "Max could not be parsed: %s", err)
+		return nil, status.Errorf(codes.InvalidArgument, "Max could not be parsed: %s", err)
 	}
 	if maxEntries < 1 {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, "Max: %d should be set to a value greater than 0", maxEntries)
+		return nil, status.Errorf(codes.InvalidArgument, "Max: %d should be set to a value greater than 0", maxEntries)
 	}
 
 	var regex *regexp.Regexp
 	if len(req.Pattern) > 0 {
 		if regex, err = regexp.Compile(req.Pattern); err != nil {
-			return nil, grpcstatus.Errorf(codes.InvalidArgument, "regex pattern could not be compiled: %s", err)
+			return nil, status.Errorf(codes.InvalidArgument, "regex pattern could not be compiled: %s", err)
 		}
 	}
 
@@ -960,13 +1110,6 @@ func (s *statusServer) Logs(
 		startTimestamp, endTimestamp, int(maxEntries), regex, inputEditMode)
 	if err != nil {
 		return nil, err
-	}
-
-	// Erase the redactable bit if requested by client.
-	if !req.KeepRedactable {
-		for i := range entries {
-			entries[i].Redactable = false
-		}
 	}
 
 	return &serverpb.LogEntriesResponse{Entries: entries}, nil
@@ -982,13 +1125,13 @@ func (s *statusServer) Stacks(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -1016,7 +1159,7 @@ func (s *statusServer) Stacks(
 	case serverpb.StacksType_THREAD_STACKS:
 		return &serverpb.JSONResponse{Data: []byte(storage.ThreadStacks())}, nil
 	default:
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, "unknown stacks type: %s", req.Type)
+		return nil, status.Errorf(codes.InvalidArgument, "unknown stacks type: %s", req.Type)
 	}
 }
 
@@ -1030,13 +1173,13 @@ func (s *statusServer) Profile(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -1051,11 +1194,11 @@ func (s *statusServer) Profile(
 	case serverpb.ProfileRequest_HEAP:
 		p := pprof.Lookup("heap")
 		if p == nil {
-			return nil, grpcstatus.Errorf(codes.InvalidArgument, "unable to find profile: heap")
+			return nil, status.Errorf(codes.InvalidArgument, "unable to find profile: heap")
 		}
 		var buf bytes.Buffer
 		if err := p.WriteTo(&buf, 0); err != nil {
-			return nil, grpcstatus.Errorf(codes.Internal, err.Error())
+			return nil, status.Errorf(codes.Internal, err.Error())
 		}
 		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
 	case serverpb.ProfileRequest_CPU:
@@ -1080,7 +1223,7 @@ func (s *statusServer) Profile(
 		}
 		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
 	default:
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, "unknown profile: %s", req.Type)
+		return nil, status.Errorf(codes.InvalidArgument, "unknown profile: %s", req.Type)
 	}
 }
 
@@ -1103,7 +1246,7 @@ func (s *statusServer) Nodes(
 	b.Scan(startKey, endKey)
 	if err := s.db.Run(ctx, b); err != nil {
 		log.Errorf(ctx, "%v", err)
-		return nil, grpcstatus.Errorf(codes.Internal, err.Error())
+		return nil, status.Errorf(codes.Internal, err.Error())
 	}
 	rows := b.Results[0].Rows
 
@@ -1113,7 +1256,7 @@ func (s *statusServer) Nodes(
 	for i, row := range rows {
 		if err := row.ValueProto(&resp.Nodes[i]); err != nil {
 			log.Errorf(ctx, "%v", err)
-			return nil, grpcstatus.Errorf(codes.Internal, err.Error())
+			return nil, status.Errorf(codes.Internal, err.Error())
 		}
 	}
 
@@ -1138,7 +1281,7 @@ func (s *statusServer) nodesStatusWithLiveness(
 	for _, node := range nodes.Nodes {
 		nodeID := node.Desc.NodeID
 		livenessStatus := statusMap[nodeID]
-		if livenessStatus == kvserverpb.NodeLivenessStatus_DECOMMISSIONED {
+		if livenessStatus == livenesspb.NodeLivenessStatus_DECOMMISSIONED {
 			// Skip over removed nodes.
 			continue
 		}
@@ -1153,7 +1296,7 @@ func (s *statusServer) nodesStatusWithLiveness(
 // nodeStatusWithLiveness combines a NodeStatus with a NodeLivenessStatus.
 type nodeStatusWithLiveness struct {
 	statuspb.NodeStatus
-	livenessStatus kvserverpb.NodeLivenessStatus
+	livenessStatus livenesspb.NodeLivenessStatus
 }
 
 // handleNodeStatus handles GET requests for a single node's status.
@@ -1164,7 +1307,7 @@ func (s *statusServer) Node(
 	ctx = s.AnnotateCtx(ctx)
 	nodeID, _, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	key := keys.NodeStatusKey(nodeID)
@@ -1172,14 +1315,14 @@ func (s *statusServer) Node(
 	b.Get(key)
 	if err := s.db.Run(ctx, b); err != nil {
 		log.Errorf(ctx, "%v", err)
-		return nil, grpcstatus.Errorf(codes.Internal, err.Error())
+		return nil, status.Errorf(codes.Internal, err.Error())
 	}
 
 	var nodeStatus statuspb.NodeStatus
 	if err := b.Results[0].Rows[0].ValueProto(&nodeStatus); err != nil {
 		err = errors.Errorf("could not unmarshal NodeStatus from %s: %s", key, err)
 		log.Errorf(ctx, "%v", err)
-		return nil, grpcstatus.Errorf(codes.Internal, err.Error())
+		return nil, status.Errorf(codes.Internal, err.Error())
 	}
 	return &nodeStatus, nil
 }
@@ -1192,7 +1335,7 @@ func (s *statusServer) Metrics(
 	ctx = s.AnnotateCtx(ctx)
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -1212,7 +1355,7 @@ func (s *statusServer) RaftDebug(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
@@ -1300,14 +1443,48 @@ func (s *statusServer) RaftDebug(
 	return &mu.resp, nil
 }
 
-func (s *statusServer) handleVars(w http.ResponseWriter, r *http.Request) {
+type varsHandler struct {
+	metricSource metricMarshaler
+	st           *cluster.Settings
+}
+
+func (h varsHandler) handleVars(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
 	w.Header().Set(httputil.ContentTypeHeader, httputil.PlaintextContentType)
-	err := s.metricSource.PrintAsText(w)
+	err := h.metricSource.PrintAsText(w)
 	if err != nil {
-		log.Errorf(r.Context(), "%v", err)
+		log.Errorf(ctx, "%v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+
+	h.appendLicenseExpiryMetric(ctx, w)
 	telemetry.Inc(telemetryPrometheusVars)
+}
+
+// appendLicenseExpiryMetric computes the seconds until the enterprise licence
+// expires on this clusters. the license expiry metric is computed on-demand
+// since it's not regularly computed as part of running the cluster unless
+// enterprise features are accessed.
+func (h varsHandler) appendLicenseExpiryMetric(ctx context.Context, w io.Writer) {
+	durationToExpiry, err := base.TimeToEnterpriseLicenseExpiry(ctx, h.st, timeutil.Now())
+	if err != nil {
+		log.Errorf(ctx, "unable to generate time to license expiry: %v", err)
+		return
+	}
+
+	secondsToExpiry := int64(durationToExpiry / time.Second)
+
+	_, err = w.Write([]byte(
+		fmt.Sprintf("seconds_until_enterprise_license_expiry %d\n", secondsToExpiry),
+	))
+	if err != nil {
+		log.Errorf(ctx, "problem writing license expiry metric: %v", err)
+	}
+}
+
+func (s *statusServer) handleVars(w http.ResponseWriter, r *http.Request) {
+	varsHandler{s.metricSource, s.st}.handleVars(w, r)
 }
 
 // Ranges returns range info for the specified node.
@@ -1317,13 +1494,13 @@ func (s *statusServer) Ranges(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -1429,13 +1606,13 @@ func (s *statusServer) Ranges(
 			// Use IterateRangeDescriptors to read from the engine only
 			// because it's already exported.
 			err := kvserver.IterateRangeDescriptors(ctx, store.Engine(),
-				func(desc roachpb.RangeDescriptor) (done bool, _ error) {
+				func(desc roachpb.RangeDescriptor) error {
 					rep, err := store.GetReplica(desc.RangeID)
 					if errors.HasType(err, (*roachpb.RangeNotFoundError)(nil)) {
-						return false, nil // continue
+						return nil // continue
 					}
 					if err != nil {
-						return true, err
+						return err
 					}
 					output.Ranges = append(output.Ranges,
 						constructRangeInfo(
@@ -1444,7 +1621,7 @@ func (s *statusServer) Ranges(
 							store.Ident.StoreID,
 							rep.Metrics(ctx, timestamp, isLiveMap, clusterNodes),
 						))
-					return false, nil
+					return nil
 				})
 			return err
 		}
@@ -1468,7 +1645,7 @@ func (s *statusServer) Ranges(
 		return nil
 	})
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.Internal, err.Error())
+		return nil, status.Errorf(codes.Internal, err.Error())
 	}
 	return &output, nil
 }
@@ -1480,7 +1657,7 @@ func (s *statusServer) HotRanges(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
@@ -1570,7 +1747,7 @@ func (s *statusServer) Range(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
@@ -1623,51 +1800,14 @@ func (s *statusServer) Range(
 func (s *statusServer) ListLocalSessions(
 	ctx context.Context, req *serverpb.ListSessionsRequest,
 ) (*serverpb.ListSessionsResponse, error) {
-	ctx = propagateGatewayMetadata(ctx)
-	ctx = s.AnnotateCtx(ctx)
-
-	sessionUser, isAdmin, err := s.admin.getUserAndRole(ctx)
+	sessions, err := s.getLocalSessions(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-
-	if !debug.GatewayRemoteAllowed(ctx, s.st) {
-		return nil, remoteDebuggingErr
+	for i := range sessions {
+		sessions[i].NodeID = s.gossip.NodeID.Get()
 	}
-
-	if !isAdmin {
-		// For non-superusers, requests with an empty username is
-		// implicitly a request for the client's own sessions.
-		if req.Username == "" {
-			req.Username = sessionUser
-		}
-
-		// Non-superusers are not allowed to query sessions others than their own.
-		if sessionUser != req.Username {
-			return nil, grpcstatus.Errorf(
-				codes.PermissionDenied,
-				"client user %q does not have permission to view sessions from user %q",
-				sessionUser, req.Username)
-		}
-	}
-
-	// The empty username means "all sessions".
-	showAll := req.Username == ""
-
-	registry := s.sessionRegistry
-	sessions := registry.SerializeAll()
-	userSessions := make([]serverpb.Session, 0, len(sessions))
-
-	for _, session := range sessions {
-		if req.Username != session.Username && !showAll {
-			continue
-		}
-
-		session.NodeID = s.gossip.NodeID.Get()
-		userSessions = append(userSessions, session)
-	}
-
-	return &serverpb.ListSessionsResponse{Sessions: userSessions}, nil
+	return &serverpb.ListSessionsResponse{Sessions: sessions}, nil
 }
 
 // iterateNodes iterates nodeFn over all non-removed nodes concurrently.
@@ -1757,12 +1897,8 @@ func (s *statusServer) ListSessions(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, _, err := s.admin.getUserAndRole(ctx); err != nil {
+	if _, _, err := s.privilegeChecker.getUserAndRole(ctx); err != nil {
 		return nil, err
-	}
-
-	if !debug.GatewayRemoteAllowed(ctx, s.st) {
-		return nil, remoteDebuggingErr
 	}
 
 	response := &serverpb.ListSessionsResponse{
@@ -1799,21 +1935,9 @@ func (s *statusServer) ListSessions(
 func (s *statusServer) CancelSession(
 	ctx context.Context, req *serverpb.CancelSessionRequest,
 ) (*serverpb.CancelSessionResponse, error) {
-	ctx = s.AnnotateCtx(ctx)
-	sessionUser, isAdmin, err := s.admin.getUserAndRole(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	if !isAdmin && sessionUser != req.Username {
-		// A user can only cancel their own sessions.
-		return nil, errInsufficientPrivilege
-	}
-
 	nodeID, local, err := s.parseNodeID(req.NodeId)
-
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -1824,15 +1948,16 @@ func (s *statusServer) CancelSession(
 		return status.CancelSession(ctx, req)
 	}
 
-	output := &serverpb.CancelSessionResponse{}
-	canceled, err := s.sessionRegistry.CancelSession(req.SessionID, req.Username)
-
+	reqUsername, err := security.MakeSQLUsernameFromPreNormalizedStringChecked(req.Username)
 	if err != nil {
-		output.Error = err.Error()
+		return nil, err
 	}
 
-	output.Canceled = canceled
-	return output, nil
+	if err := s.checkCancelPrivilege(ctx, reqUsername, findSessionBySessionID(req.SessionID)); err != nil {
+		return nil, err
+	}
+
+	return s.sessionRegistry.CancelSession(req.SessionID)
 }
 
 // CancelQuery responds to a query cancellation request, and cancels
@@ -1840,25 +1965,14 @@ func (s *statusServer) CancelSession(
 func (s *statusServer) CancelQuery(
 	ctx context.Context, req *serverpb.CancelQueryRequest,
 ) (*serverpb.CancelQueryResponse, error) {
-	sessionUser, isAdmin, err := s.admin.getUserAndRole(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	if !isAdmin && sessionUser != req.Username {
-		// A user can only cancel their own queries.
-		return nil, errInsufficientPrivilege
-	}
-
-	ctx = propagateGatewayMetadata(ctx)
-	ctx = s.AnnotateCtx(ctx)
 	nodeID, local, err := s.parseNodeID(req.NodeId)
-
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
-
 	if !local {
+		// This request needs to be forwarded to another node.
+		ctx = propagateGatewayMetadata(ctx)
+		ctx = s.AnnotateCtx(ctx)
 		status, err := s.dialNode(ctx, nodeID)
 		if err != nil {
 			return nil, err
@@ -1866,14 +1980,20 @@ func (s *statusServer) CancelQuery(
 		return status.CancelQuery(ctx, req)
 	}
 
-	output := &serverpb.CancelQueryResponse{}
-	canceled, err := s.sessionRegistry.CancelQuery(req.QueryID, req.Username)
+	reqUsername, err := security.MakeSQLUsernameFromPreNormalizedStringChecked(req.Username)
+	if err != nil {
+		return nil, err
+	}
 
+	if err := s.checkCancelPrivilege(ctx, reqUsername, findSessionByQueryID(req.QueryID)); err != nil {
+		return nil, err
+	}
+
+	output := &serverpb.CancelQueryResponse{}
+	output.Canceled, err = s.sessionRegistry.CancelQuery(req.QueryID)
 	if err != nil {
 		output.Error = err.Error()
 	}
-
-	output.Canceled = canceled
 	return output, nil
 }
 
@@ -1885,13 +2005,13 @@ func (s *statusServer) SpanStats(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeID)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -1928,7 +2048,7 @@ func (s *statusServer) Diagnostics(
 	ctx = s.AnnotateCtx(ctx)
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -1949,13 +2069,13 @@ func (s *statusServer) Stores(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
 	if !local {
@@ -2030,25 +2150,28 @@ func marshalJSONResponse(value interface{}) (*serverpb.JSONResponse, error) {
 	return &serverpb.JSONResponse{Data: data}, nil
 }
 
-func userFromContext(ctx context.Context) (string, error) {
+func userFromContext(ctx context.Context) (res security.SQLUsername, err error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		// If the incoming context has metadata but no attached web session user,
 		// it's a gRPC / internal SQL connection which has root on the cluster.
-		return security.RootUser, nil
+		return security.RootUserName(), nil
 	}
 	usernames, ok := md[webSessionUserKeyStr]
 	if !ok {
 		// If the incoming context has metadata but no attached web session user,
 		// it's a gRPC / internal SQL connection which has root on the cluster.
-		return security.RootUser, nil
+		return security.RootUserName(), nil
 	}
 	if len(usernames) != 1 {
 		log.Warningf(ctx, "context's incoming metadata contains unexpected number of usernames: %+v ", md)
-		return "", fmt.Errorf(
+		return res, fmt.Errorf(
 			"context's incoming metadata contains unexpected number of usernames: %+v ", md)
 	}
-	return usernames[0], nil
+	// At this point the user is already logged in, so we can assume
+	// the username has been normalized already.
+	username := security.MakeSQLUsernameFromPreNormalizedString(usernames[0])
+	return username, nil
 }
 
 type systemInfoOnce struct {
@@ -2096,13 +2219,13 @@ func (s *statusServer) JobRegistryStatus(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.InvalidArgument, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 	if !local {
 		status, err := s.dialNode(ctx, nodeID)
@@ -2132,7 +2255,7 @@ func (s *statusServer) JobStatus(
 ) (*serverpb.JobStatusResponse, error) {
 	ctx = s.AnnotateCtx(propagateGatewayMetadata(ctx))
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 

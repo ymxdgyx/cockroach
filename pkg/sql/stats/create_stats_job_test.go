@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
@@ -45,10 +46,7 @@ func TestCreateStatsControlJob(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	// Test with 3 nodes and rowexec.SamplerProgressInterval=100 to ensure
 	// that progress metadata is sent correctly after every 100 input rows.
@@ -78,7 +76,7 @@ func TestCreateStatsControlJob(t *testing.T) {
 
 	t.Run("cancel", func(t *testing.T) {
 		// Test that CREATE STATISTICS can be canceled.
-		query := fmt.Sprintf(`CREATE STATISTICS s1 FROM d.t`)
+		query := `CREATE STATISTICS s1 FROM d.t`
 
 		if _, err := jobutils.RunJob(
 			t, sqlDB, &allowRequest, []string{"cancel"}, query,
@@ -94,7 +92,7 @@ func TestCreateStatsControlJob(t *testing.T) {
 
 	t.Run("pause", func(t *testing.T) {
 		// Test that CREATE STATISTICS can be paused and resumed.
-		query := fmt.Sprintf(`CREATE STATISTICS s2 FROM d.t`)
+		query := `CREATE STATISTICS s2 FROM d.t`
 
 		jobID, err := jobutils.RunJob(
 			t, sqlDB, &allowRequest, []string{"PAUSE"}, query,
@@ -137,12 +135,7 @@ func TestCreateStatsLivenessWithRestart(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldAdoptInterval, oldCancelInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldAdoptInterval
-		jobs.DefaultCancelInterval = oldCancelInterval
-	}(jobs.DefaultAdoptInterval, jobs.DefaultCancelInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
-	jobs.DefaultCancelInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	const nodes = 1
 	nl := jobs.NewFakeNodeLiveness(nodes)
@@ -251,12 +244,7 @@ func TestCreateStatsLivenessWithLeniency(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldAdoptInterval, oldCancelInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldAdoptInterval
-		jobs.DefaultCancelInterval = oldCancelInterval
-	}(jobs.DefaultAdoptInterval, jobs.DefaultCancelInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
-	jobs.DefaultCancelInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	const nodes = 1
 	nl := jobs.NewFakeNodeLiveness(nodes)
@@ -344,10 +332,7 @@ func TestAtMostOneRunningCreateStats(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldAdoptInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldAdoptInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	var allowRequest chan struct{}
 
@@ -458,10 +443,7 @@ func TestDeleteFailedJob(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldAdoptInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldAdoptInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	ctx := context.Background()
 	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})
@@ -604,6 +586,13 @@ func TestCreateStatsProgress(t *testing.T) {
 			fractionCompleted,
 		)
 	}
+
+	// Invalidate the stats cache so that we can be sure to get the latest stats.
+	var tableID descpb.ID
+	sqlDB.QueryRow(t, `SELECT id FROM system.namespace WHERE name = 't'`).Scan(&tableID)
+	tc.Servers[0].ExecutorConfig().(sql.ExecutorConfig).TableStatsCache.InvalidateTableStats(
+		ctx, tableID,
+	)
 
 	// Start another CREATE STATISTICS run and wait until it has scanned part of
 	// the table.

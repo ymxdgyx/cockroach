@@ -14,12 +14,13 @@ import (
 	"context"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
@@ -29,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -45,14 +45,12 @@ var queryCacheEnabled = settings.RegisterBoolSetting(
 //  - AnonymizedStr
 //  - Memo (for reuse during exec, if appropriate).
 func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) {
-	stmt := p.stmt
+	stmt := &p.stmt
 
 	opc := &p.optPlanningCtx
 	opc.reset()
 
-	stmt.Prepared.AnonymizedStr = anonymizeStmt(stmt.AST)
-
-	switch stmt.AST.(type) {
+	switch n := stmt.AST.(type) {
 	case *tree.AlterIndex, *tree.AlterTable, *tree.AlterSequence,
 		*tree.Analyze,
 		*tree.BeginTransaction,
@@ -80,14 +78,16 @@ func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) 
 		// descriptors and such).
 		return opc.flags, nil
 
-	case *tree.ExplainAnalyzeDebug:
-		// This statement returns result columns but does not support placeholders,
-		// and we don't want to do anything during prepare.
-		if len(p.semaCtx.Placeholders.Types) != 0 {
-			return 0, errors.Errorf("%s does not support placeholders", stmt.AST.StatementTag())
+	case *tree.ExplainAnalyze:
+		if n.Mode == tree.ExplainDebug {
+			// This statement returns result columns but does not support placeholders,
+			// and we don't want to do anything during prepare.
+			if len(p.semaCtx.Placeholders.Types) != 0 {
+				return 0, errors.Errorf("%s does not support placeholders", stmt.AST.StatementTag())
+			}
+			stmt.Prepared.Columns = colinfo.ExplainPlanColumns
+			return opc.flags, nil
 		}
-		stmt.Prepared.Columns = sqlbase.ExplainAnalyzeDebugColumns
-		return opc.flags, nil
 	}
 
 	if opc.useCache {
@@ -128,7 +128,7 @@ func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) 
 
 	md := memo.Metadata()
 	physical := memo.RootProps()
-	resultCols := make(sqlbase.ResultColumns, len(physical.Presentation))
+	resultCols := make(colinfo.ResultColumns, len(physical.Presentation))
 	for i, col := range physical.Presentation {
 		colMeta := md.ColumnMeta(col.ID)
 		resultCols[i].Name = col.Alias
@@ -144,11 +144,14 @@ func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) 
 			// Convert the metadata opt.ColumnID to its ordinal position in the table.
 			colOrdinal := colMeta.Table.ColumnOrdinal(col.ID)
 			// Use that ordinal position to retrieve the column's stable ID.
-			switch col := tab.Column(colOrdinal).(type) {
-			case *descpb.ColumnDescriptor:
-				resultCols[i].PGAttributeNum = col.GetPGAttributeNum()
-			default:
-				resultCols[i].PGAttributeNum = uint32(col.ColID())
+			var desc *descpb.ColumnDescriptor
+			if catTable, ok := tab.(optCatalogTableInterface); ok {
+				desc = catTable.getColDesc(colOrdinal)
+			}
+			if desc != nil {
+				resultCols[i].PGAttributeNum = desc.GetPGAttributeNum()
+			} else {
+				resultCols[i].PGAttributeNum = uint32(tab.Column(colOrdinal).ColID())
 			}
 		}
 	}
@@ -184,7 +187,7 @@ func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) 
 // makeOptimizerPlan generates a plan using the cost-based optimizer.
 // On success, it populates p.curPlan.
 func (p *planner) makeOptimizerPlan(ctx context.Context) error {
-	stmt := p.stmt
+	p.curPlan.init(&p.stmt, &p.instrumentation)
 
 	opc := &p.optPlanningCtx
 	opc.reset()
@@ -195,14 +198,6 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 	}
 
 	// Build the plan tree.
-	root := execMemo.RootExpr()
-	var (
-		plan exec.Plan
-		bld  *execbuilder.Builder
-	)
-	// TODO(yuzefovich): we're creating a new exec.Factory for every query, but
-	// we probably could pool those allocations using sync.Pool. Investigate
-	// this.
 	if mode := p.SessionData().ExperimentalDistSQLPlanningMode; mode != sessiondata.ExperimentalDistSQLPlanningOff {
 		planningMode := distSQLDefaultPlanning
 		// If this transaction has modified or created any types, it is not safe to
@@ -211,11 +206,14 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 		if p.Descriptors().HasUncommittedTypes() {
 			planningMode = distSQLLocalOnlyPlanning
 		}
-		bld = execbuilder.New(
-			newDistSQLSpecExecFactory(p, planningMode), execMemo, &opc.catalog, root,
-			p.EvalContext(), p.autoCommit,
+		err := opc.runExecBuilder(
+			&p.curPlan,
+			&p.stmt,
+			newDistSQLSpecExecFactory(p, planningMode),
+			execMemo,
+			p.EvalContext(),
+			p.autoCommit,
 		)
-		plan, err = bld.Build()
 		if err != nil {
 			if mode == sessiondata.ExperimentalDistSQLPlanningAlways &&
 				!strings.Contains(p.stmt.AST.StatementTag(), "SET") {
@@ -229,12 +227,11 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 				return err
 			}
 			// We will fallback to the old path.
-		}
-		if err == nil {
+		} else {
 			// TODO(yuzefovich): think through whether subqueries or
 			// postqueries can be distributed. If that's the case, we might
 			// need to also look at the plan distribution of those.
-			m := plan.(*planTop).main
+			m := p.curPlan.main
 			isPartiallyDistributed := m.physPlan.Distribution == physicalplan.PartiallyDistributedPlan
 			if isPartiallyDistributed && p.SessionData().PartiallyDistributedPlansDisabled {
 				// The planning has succeeded, but we've created a partially
@@ -243,52 +240,34 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 				// that forces local planning.
 				// TODO(yuzefovich): remove this logic when deleting old
 				// execFactory.
-				bld = execbuilder.New(
-					newDistSQLSpecExecFactory(p, distSQLLocalOnlyPlanning), execMemo, &opc.catalog, root,
-					p.EvalContext(), p.autoCommit,
+				err = opc.runExecBuilder(
+					&p.curPlan,
+					&p.stmt,
+					newDistSQLSpecExecFactory(p, distSQLLocalOnlyPlanning),
+					execMemo,
+					p.EvalContext(),
+					p.autoCommit,
 				)
-				plan, err = bld.Build()
+			}
+			if err == nil {
+				return nil
 			}
 		}
-		if err != nil {
-			bld = nil
-			// TODO(yuzefovich): make the logging conditional on the verbosity
-			// level once new DistSQL planning is no longer experimental.
-			log.Infof(ctx, "distSQLSpecExecFactory failed planning with %v, "+
-				"falling back to the old path", err)
-		}
-	}
-	if bld == nil {
-		// If bld is non-nil, then experimental planning has succeeded and has
-		// already created a plan.
-		bld = execbuilder.New(
-			newExecFactory(p), execMemo, &opc.catalog, root, p.EvalContext(), p.autoCommit,
+		// TODO(yuzefovich): make the logging conditional on the verbosity
+		// level once new DistSQL planning is no longer experimental.
+		log.Infof(
+			ctx, "distSQLSpecExecFactory failed planning with %v, falling back to the old path", err,
 		)
-		plan, err = bld.Build()
-		if err != nil {
-			return err
-		}
 	}
-
-	result := plan.(*planTop)
-	result.mem = execMemo
-	result.catalog = &opc.catalog
-	result.stmt = stmt
-	result.flags = opc.flags
-	if bld.IsDDL {
-		result.flags.Set(planFlagIsDDL)
-	}
-
-	cols := result.main.planColumns()
-	if stmt.ExpectedTypes != nil {
-		if !stmt.ExpectedTypes.TypesEqual(cols) {
-			return pgerror.New(pgcode.FeatureNotSupported, "cached plan must not change result type")
-		}
-	}
-
-	p.curPlan = *result
-
-	return nil
+	// If we got here, we did not create a plan above.
+	return opc.runExecBuilder(
+		&p.curPlan,
+		&p.stmt,
+		newExecFactory(p),
+		execMemo,
+		p.EvalContext(),
+		p.autoCommit,
+	)
 }
 
 type optPlanningCtx struct {
@@ -377,14 +356,14 @@ func (opc *optPlanningCtx) buildReusableMemo(ctx context.Context) (_ *memo.Memo,
 			)
 		}
 
-		if p.SessionData().User != security.RootUser {
+		if !p.SessionData().User().IsRootUser() {
 			return nil, pgerror.New(pgcode.InsufficientPrivilege,
 				"PREPARE AS OPT PLAN may only be used by root",
 			)
 		}
 	}
 
-	if p.SessionData().SaveTablesPrefix != "" && p.SessionData().User != security.RootUser {
+	if p.SessionData().SaveTablesPrefix != "" && !p.SessionData().User().IsRootUser() {
 		return nil, pgerror.New(pgcode.InsufficientPrivilege,
 			"sub-expression tables creation may only be used by root",
 		)
@@ -423,6 +402,7 @@ func (opc *optPlanningCtx) buildReusableMemo(ctx context.Context) (_ *memo.Memo,
 		// operators that can be constant folded, then fully optimize it now - it
 		// can be reused without further changes to build the execution tree.
 		if !f.Memo().HasPlaceholders() && !f.FoldingControl().PreventedStableFold() {
+			opc.log(ctx, "optimizing (no placeholders)")
 			if _, err := opc.optimizer.Optimize(); err != nil {
 				return nil, err
 			}
@@ -517,6 +497,8 @@ func (opc *optPlanningCtx) buildExecMemo(ctx context.Context) (_ *memo.Memo, _ e
 		}
 		opc.flags.Set(planFlagOptCacheMiss)
 		opc.log(ctx, "query cache miss")
+	} else {
+		opc.log(ctx, "not using query cache")
 	}
 
 	// We are executing a statement for which there is no reusable memo
@@ -550,4 +532,71 @@ func (opc *optPlanningCtx) buildExecMemo(ctx context.Context) (_ *memo.Memo, _ e
 	}
 
 	return f.Memo(), nil
+}
+
+// runExecBuilder execbuilds a plan using the given factory and stores the
+// result in planTop. If required, also captures explain data using the explain
+// factory.
+func (opc *optPlanningCtx) runExecBuilder(
+	planTop *planTop,
+	stmt *Statement,
+	f exec.Factory,
+	mem *memo.Memo,
+	evalCtx *tree.EvalContext,
+	allowAutoCommit bool,
+) error {
+	var result *planComponents
+	var isDDL bool
+	var containsFullTableScan bool
+	var containsFullIndexScan bool
+	if !planTop.instrumentation.ShouldBuildExplainPlan() {
+		// No instrumentation.
+		bld := execbuilder.New(f, mem, &opc.catalog, mem.RootExpr(), evalCtx, allowAutoCommit)
+		plan, err := bld.Build()
+		if err != nil {
+			return err
+		}
+		result = plan.(*planComponents)
+		isDDL = bld.IsDDL
+		containsFullTableScan = bld.ContainsFullTableScan
+		containsFullIndexScan = bld.ContainsFullIndexScan
+	} else {
+		// Create an explain factory and record the explain.Plan.
+		explainFactory := explain.NewFactory(f)
+		bld := execbuilder.New(explainFactory, mem, &opc.catalog, mem.RootExpr(), evalCtx, allowAutoCommit)
+		plan, err := bld.Build()
+		if err != nil {
+			return err
+		}
+		explainPlan := plan.(*explain.Plan)
+		result = explainPlan.WrappedPlan.(*planComponents)
+		isDDL = bld.IsDDL
+		containsFullTableScan = bld.ContainsFullTableScan
+		containsFullIndexScan = bld.ContainsFullIndexScan
+
+		planTop.instrumentation.RecordExplainPlan(explainPlan)
+	}
+
+	if stmt.ExpectedTypes != nil {
+		cols := result.main.planColumns()
+		if !stmt.ExpectedTypes.TypesEqual(cols) {
+			return pgerror.New(pgcode.FeatureNotSupported, "cached plan must not change result type")
+		}
+	}
+
+	planTop.planComponents = *result
+	planTop.mem = mem
+	planTop.catalog = &opc.catalog
+	planTop.stmt = stmt
+	planTop.flags = opc.flags
+	if isDDL {
+		planTop.flags.Set(planFlagIsDDL)
+	}
+	if containsFullTableScan {
+		planTop.flags.Set(planFlagContainsFullTableScan)
+	}
+	if containsFullIndexScan {
+		planTop.flags.Set(planFlagContainsFullIndexScan)
+	}
+	return nil
 }

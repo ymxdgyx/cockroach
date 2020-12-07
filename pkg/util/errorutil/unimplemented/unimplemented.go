@@ -13,6 +13,7 @@ package unimplemented
 import (
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/errors"
 )
 
@@ -67,7 +68,7 @@ func unimplementedInternal(
 	// Create the issue link.
 	link := errors.IssueLink{Detail: detail}
 	if issue > 0 {
-		link.IssueURL = MakeURL(issue)
+		link.IssueURL = build.MakeIssueURL(issue)
 	}
 
 	// Instantiate the base error.
@@ -96,9 +97,4 @@ func unimplementedInternal(
 		err = errors.WithTelemetry(err, detail)
 	}
 	return err
-}
-
-// MakeURL produces a URL to a CockroachDB issue.
-func MakeURL(issue int) string {
-	return fmt.Sprintf("https://go.crdb.dev/issue/%d", issue)
 }

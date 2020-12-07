@@ -22,10 +22,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/optionalnodeliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slinstance"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slstorage"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -37,9 +39,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/stretchr/testify/require"
 )
 
-func FakePHS(opName, user string) (interface{}, func()) {
+func FakePHS(opName string, user security.SQLUsername) (interface{}, func()) {
 	return nil, func() {}
 }
 
@@ -71,7 +74,7 @@ func TestRegistryCancelation(t *testing.T) {
 		log.AmbientContext{},
 		stopper,
 		clock,
-		sqlbase.MakeOptionalNodeLiveness(nodeLiveness),
+		optionalnodeliveness.MakeContainer(nodeLiveness),
 		db,
 		nil, /* ex */
 		base.TestingIDContainer,
@@ -80,6 +83,7 @@ func TestRegistryCancelation(t *testing.T) {
 		histogramWindowInterval,
 		FakePHS,
 		"",
+		nil, /* knobs */
 	)
 
 	const cancelInterval = time.Nanosecond
@@ -236,7 +240,7 @@ func TestRegistryGC(t *testing.T) {
 		desc.Mutations = mutations
 		if err := kvDB.Put(
 			context.Background(),
-			sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
+			catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
 			desc.DescriptorProto(),
 		); err != nil {
 			t.Fatal(err)
@@ -250,7 +254,7 @@ func TestRegistryGC(t *testing.T) {
 		desc.GCMutations = gcMutations
 		if err := kvDB.Put(
 			context.Background(),
-			sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
+			catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
 			desc.DescriptorProto(),
 		); err != nil {
 			t.Fatal(err)
@@ -269,7 +273,7 @@ func TestRegistryGC(t *testing.T) {
 		}
 		if err := kvDB.Put(
 			context.Background(),
-			sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
+			catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
 			desc.DescriptorProto(),
 		); err != nil {
 			t.Fatal(err)
@@ -373,4 +377,27 @@ CREATE DATABASE IF NOT EXISTS t; CREATE TABLE IF NOT EXISTS t.to_be_mutated AS S
 			}
 		}
 	}
+}
+
+func TestRegistryGCPagination(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	db := sqlutils.MakeSQLRunner(sqlDB)
+	defer s.Stopper().Stop(ctx)
+
+	for i := 0; i < 2*cleanupPageSize+1; i++ {
+		payload, err := protoutil.Marshal(&jobspb.Payload{})
+		require.NoError(t, err)
+		db.Exec(t,
+			`INSERT INTO system.jobs (status, created, payload) VALUES ($1, $2, $3)`,
+			StatusCanceled, timeutil.Now().Add(-time.Hour), payload)
+	}
+
+	ts := timeutil.Now()
+	require.NoError(t, s.JobRegistry().(*Registry).cleanupOldJobs(ctx, ts.Add(-10*time.Minute)))
+	var count int
+	db.QueryRow(t, `SELECT count(1) FROM system.jobs`).Scan(&count)
+	require.Zero(t, count)
 }

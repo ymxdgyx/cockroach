@@ -146,7 +146,7 @@ type CleanupIntentsFunc func(context.Context, []roachpb.Intent) error
 // transaction record, pushing the transaction first if it is
 // PENDING. Once all intents are resolved successfully, removes the
 // transaction record.
-type CleanupTxnIntentsAsyncFunc func(context.Context, *roachpb.Transaction, []roachpb.LockUpdate) error
+type CleanupTxnIntentsAsyncFunc func(context.Context, *roachpb.Transaction) error
 
 // Run runs garbage collection for the specified descriptor on the
 // provided Engine (which is not mutated). It uses the provided gcFn
@@ -250,7 +250,7 @@ func processReplicatedKeyRange(
 		if meta.Txn != nil {
 			// Keep track of intent to resolve if older than the intent
 			// expiration threshold.
-			if hlc.Timestamp(meta.Timestamp).Less(intentExp) {
+			if meta.Timestamp.ToTimestamp().Less(intentExp) {
 				txnID := meta.Txn.ID
 				if _, ok := txnMap[txnID]; !ok {
 					txnMap[txnID] = &roachpb.Transaction{
@@ -423,7 +423,7 @@ func processLocalKeyRange(
 		// If the transaction needs to be pushed or there are intents to
 		// resolve, invoke the cleanup function.
 		if !txn.Status.IsFinalized() || len(txn.LockSpans) > 0 {
-			return cleanupTxnIntentsAsyncFn(ctx, txn, roachpb.AsLockUpdates(txn, txn.LockSpans))
+			return cleanupTxnIntentsAsyncFn(ctx, txn)
 		}
 		b.FlushingAdd(ctx, key)
 		return nil
@@ -484,8 +484,8 @@ func processLocalKeyRange(
 	endKey := keys.MakeRangeKeyPrefix(desc.EndKey)
 
 	_, err := storage.MVCCIterate(ctx, snap, startKey, endKey, hlc.Timestamp{}, storage.MVCCScanOptions{},
-		func(kv roachpb.KeyValue) (bool, error) {
-			return false, handleOne(kv)
+		func(kv roachpb.KeyValue) error {
+			return handleOne(kv)
 		})
 	return err
 }

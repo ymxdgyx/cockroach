@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -57,22 +58,29 @@ func TestPlanToTreeAndPlanToString(t *testing.T) {
 			internalPlanner, cleanup := NewInternalPlanner(
 				"test",
 				kv.NewTxn(ctx, db, s.NodeID()),
-				security.RootUser,
+				security.RootUserName(),
 				&MemoryMetrics{},
 				&execCfg,
+				sessiondatapb.SessionData{},
 			)
 			defer cleanup()
 			p := internalPlanner.(*planner)
 
-			p.stmt = &Statement{Statement: stmt}
+			ih := &p.instrumentation
+			ih.codec = execCfg.Codec
+			ih.collectBundle = true
+			ih.savePlanForStats = true
+
+			p.stmt = makeStatement(stmt, ClusterWideID{})
 			if err := p.makeOptimizerPlan(ctx); err != nil {
 				t.Fatal(err)
 			}
+			p.curPlan.flags.Set(planFlagExecDone)
+			p.curPlan.close(ctx)
 			if d.Cmd == "plan-string" {
-				return planToString(ctx, &p.curPlan)
+				return ih.planStringForBundle(&phaseTimes{})
 			}
-			tree := planToTree(ctx, &p.curPlan)
-			treeYaml, err := yaml.Marshal(tree)
+			treeYaml, err := yaml.Marshal(ih.PlanForStats(ctx))
 			if err != nil {
 				t.Fatal(err)
 			}

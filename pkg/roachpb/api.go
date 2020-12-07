@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
 
@@ -212,6 +213,55 @@ type Request interface {
 	flags() int
 }
 
+// SizedWriteRequest is an interface used to expose the number of bytes a
+// request might write.
+type SizedWriteRequest interface {
+	Request
+	WriteBytes() int64
+}
+
+var _ SizedWriteRequest = (*PutRequest)(nil)
+
+// WriteBytes makes PutRequest implement SizedWriteRequest.
+func (pr *PutRequest) WriteBytes() int64 {
+	return int64(len(pr.Key)) + int64(pr.Value.Size())
+}
+
+var _ SizedWriteRequest = (*ConditionalPutRequest)(nil)
+
+// WriteBytes makes ConditionalPutRequest implement SizedWriteRequest.
+func (cpr *ConditionalPutRequest) WriteBytes() int64 {
+	return int64(len(cpr.Key)) + int64(cpr.Value.Size())
+}
+
+var _ SizedWriteRequest = (*InitPutRequest)(nil)
+
+// WriteBytes makes InitPutRequest implement SizedWriteRequest.
+func (pr *InitPutRequest) WriteBytes() int64 {
+	return int64(len(pr.Key)) + int64(pr.Value.Size())
+}
+
+var _ SizedWriteRequest = (*IncrementRequest)(nil)
+
+// WriteBytes makes IncrementRequest implement SizedWriteRequest.
+func (ir *IncrementRequest) WriteBytes() int64 {
+	return int64(len(ir.Key)) + 8 // assume 8 bytes for the int64
+}
+
+var _ SizedWriteRequest = (*DeleteRequest)(nil)
+
+// WriteBytes makes DeleteRequest implement SizedWriteRequest.
+func (dr *DeleteRequest) WriteBytes() int64 {
+	return int64(len(dr.Key))
+}
+
+var _ SizedWriteRequest = (*AddSSTableRequest)(nil)
+
+// WriteBytes makes AddSSTableRequest implement SizedWriteRequest.
+func (r *AddSSTableRequest) WriteBytes() int64 {
+	return int64(len(r.Data))
+}
+
 // leaseRequestor is implemented by requests dealing with leases.
 // Implementors return the previous lease at the time the request
 // was proposed.
@@ -296,7 +346,7 @@ func (sr *ScanResponse) combine(c combinable) error {
 	return nil
 }
 
-var _ combinable = &AdminVerifyProtectedTimestampResponse{}
+var _ combinable = &ScanResponse{}
 
 func (avptr *AdminVerifyProtectedTimestampResponse) combine(c combinable) error {
 	other := c.(*AdminVerifyProtectedTimestampResponse)
@@ -309,7 +359,7 @@ func (avptr *AdminVerifyProtectedTimestampResponse) combine(c combinable) error 
 	return nil
 }
 
-var _ combinable = &ScanResponse{}
+var _ combinable = &AdminVerifyProtectedTimestampResponse{}
 
 // combine implements the combinable interface.
 func (sr *ReverseScanResponse) combine(c combinable) error {
@@ -545,26 +595,6 @@ func (sr *ReverseScanResponse) Verify(req Request) error {
 		}
 	}
 	return nil
-}
-
-// MustSetInner sets the Request contained in the union. It panics if the
-// request is not recognized by the union type. The RequestUnion is reset
-// before being repopulated.
-func (ru *RequestUnion) MustSetInner(args Request) {
-	ru.Reset()
-	if !ru.SetInner(args) {
-		panic(fmt.Sprintf("%T excludes %T", ru, args))
-	}
-}
-
-// MustSetInner sets the Response contained in the union. It panics if the
-// response is not recognized by the union type. The ResponseUnion is reset
-// before being repopulated.
-func (ru *ResponseUnion) MustSetInner(reply Response) {
-	ru.Reset()
-	if !ru.SetInner(reply) {
-		panic(fmt.Sprintf("%T excludes %T", ru, reply))
-	}
 }
 
 // Method implements the Request interface.
@@ -1159,14 +1189,15 @@ func (drr *DeleteRangeRequest) flags() int {
 	// This workaround does not preclude us from creating a separate
 	// "DeleteInlineRange" command at a later date.
 	if drr.Inline {
-		return isWrite | isRange | isAlone
+		return isRead | isWrite | isRange | isAlone
 	}
 	// DeleteRange updates the timestamp cache as it doesn't leave intents or
-	// tombstones for keys which don't yet exist, but still wants to prevent
-	// anybody from writing under it. Note that, even if we didn't update the ts
-	// cache, deletes of keys that exist would not be lost (since the DeleteRange
-	// leaves intents on those keys), but deletes of "empty space" would.
-	return isWrite | isTxn | isLocking | isIntentWrite | isRange | consultsTSCache | updatesTSCache | needsRefresh | canBackpressure
+	// tombstones for keys which don't yet exist or keys that already have
+	// tombstones on them, but still wants to prevent anybody from writing under
+	// it. Note that, even if we didn't update the ts cache, deletes of keys
+	// that exist would not be lost (since the DeleteRange leaves intents on
+	// those keys), but deletes of "empty space" would.
+	return isRead | isWrite | isTxn | isLocking | isIntentWrite | isRange | consultsTSCache | updatesTSCache | needsRefresh | canBackpressure
 }
 
 // Note that ClearRange commands cannot be part of a transaction as
@@ -1307,7 +1338,7 @@ func (b *BulkOpSummary) Add(other BulkOpSummary) {
 func (e *RangeFeedEvent) MustSetValue(value interface{}) {
 	e.Reset()
 	if !e.SetValue(value) {
-		panic(fmt.Sprintf("%T excludes %T", e, value))
+		panic(errors.AssertionFailedf("%T excludes %T", e, value))
 	}
 }
 
@@ -1369,14 +1400,26 @@ func (rc ReplicationChanges) byType(typ ReplicaChangeType) []ReplicationTarget {
 	return sl
 }
 
-// Additions returns a slice of all contained replication changes that add replicas.
-func (rc ReplicationChanges) Additions() []ReplicationTarget {
-	return rc.byType(ADD_REPLICA)
+// VoterAdditions returns a slice of all contained replication changes that add replicas.
+func (rc ReplicationChanges) VoterAdditions() []ReplicationTarget {
+	return rc.byType(ADD_VOTER)
 }
 
-// Removals returns a slice of all contained replication changes that remove replicas.
-func (rc ReplicationChanges) Removals() []ReplicationTarget {
-	return rc.byType(REMOVE_REPLICA)
+// VoterRemovals returns a slice of all contained replication changes that remove replicas.
+func (rc ReplicationChanges) VoterRemovals() []ReplicationTarget {
+	return rc.byType(REMOVE_VOTER)
+}
+
+// NonVoterAdditions returns a slice of all contained replication
+// changes that add non-voters.
+func (rc ReplicationChanges) NonVoterAdditions() []ReplicationTarget {
+	return rc.byType(ADD_NON_VOTER)
+}
+
+// NonVoterRemovals returns a slice of all contained replication changes
+// that remove non-voters.
+func (rc ReplicationChanges) NonVoterRemovals() []ReplicationTarget {
+	return rc.byType(REMOVE_NON_VOTER)
 }
 
 // Changes returns the changes requested by this AdminChangeReplicasRequest, taking
@@ -1416,4 +1459,22 @@ func (rirr *ResolveIntentRangeRequest) AsLockUpdate() LockUpdate {
 		Status:         rirr.Status,
 		IgnoredSeqNums: rirr.IgnoredSeqNums,
 	}
+}
+
+// CreateStoreIdent creates a store identifier out of the details captured
+// within the join node response (the join node RPC is used to allocate a store
+// ID for the client's first store).
+func (r *JoinNodeResponse) CreateStoreIdent() (StoreIdent, error) {
+	nodeID, storeID := NodeID(r.NodeID), StoreID(r.StoreID)
+	clusterID, err := uuid.FromBytes(r.ClusterID)
+	if err != nil {
+		return StoreIdent{}, err
+	}
+
+	sIdent := StoreIdent{
+		ClusterID: clusterID,
+		NodeID:    nodeID,
+		StoreID:   storeID,
+	}
+	return sIdent, nil
 }

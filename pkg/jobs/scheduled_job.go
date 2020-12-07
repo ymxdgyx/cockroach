@@ -21,8 +21,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
@@ -36,15 +37,18 @@ import (
 // Do not manipulate these fields directly, use methods in the ScheduledJob.
 type scheduledJobRecord struct {
 	ScheduleID      int64                     `col:"schedule_id"`
-	ScheduleName    string                    `col:"schedule_name"`
-	Owner           string                    `col:"owner"`
+	ScheduleLabel   string                    `col:"schedule_name"`
+	Owner           security.SQLUsername      `col:"owner"`
 	NextRun         time.Time                 `col:"next_run"`
+	ScheduleState   jobspb.ScheduleState      `col:"schedule_state"`
 	ScheduleExpr    string                    `col:"schedule_expr"`
 	ScheduleDetails jobspb.ScheduleDetails    `col:"schedule_details"`
 	ExecutorType    string                    `col:"executor_type"`
 	ExecutionArgs   jobspb.ExecutionArguments `col:"execution_args"`
-	ScheduleChanges jobspb.ScheduleChangeInfo `col:"schedule_changes"`
 }
+
+// InvalidScheduleID is a constant indicating the schedule ID is not valid.
+const InvalidScheduleID int64 = 0
 
 // ScheduledJob  is a representation of the scheduled job.
 // This struct can marshal/unmarshal changes made to the underlying system.scheduled_job table.
@@ -72,20 +76,61 @@ func NewScheduledJob(env scheduledjobs.JobSchedulerEnv) *ScheduledJob {
 	}
 }
 
+// LoadScheduledJob loads scheduled job record from the database.
+func LoadScheduledJob(
+	ctx context.Context,
+	env scheduledjobs.JobSchedulerEnv,
+	id int64,
+	ex sqlutil.InternalExecutor,
+	txn *kv.Txn,
+) (*ScheduledJob, error) {
+	rows, cols, err := ex.QueryWithCols(ctx, "lookup-schedule", txn,
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		fmt.Sprintf("SELECT * FROM %s WHERE schedule_id = %d",
+			env.ScheduledJobsTableName(), id))
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(rows) != 1 {
+		return nil, errors.Newf(
+			"expected to find 1 schedule, found %d with schedule_id=%d",
+			len(rows), id)
+	}
+
+	j := NewScheduledJob(env)
+	if err := j.InitFromDatums(rows[0], cols); err != nil {
+		return nil, err
+	}
+	return j, nil
+}
+
 // ScheduleID returns schedule ID.
 func (j *ScheduledJob) ScheduleID() int64 {
 	return j.rec.ScheduleID
 }
 
-// ScheduleName returns schedule name.
-func (j *ScheduledJob) ScheduleName() string {
-	return j.rec.ScheduleName
+// ScheduleLabel returns schedule label.
+func (j *ScheduledJob) ScheduleLabel() string {
+	return j.rec.ScheduleLabel
 }
 
-// SetScheduleName updates schedule name.
-func (j *ScheduledJob) SetScheduleName(name string) {
-	j.rec.ScheduleName = name
+// SetScheduleLabel updates schedule label.
+func (j *ScheduledJob) SetScheduleLabel(label string) {
+	j.rec.ScheduleLabel = label
 	j.markDirty("schedule_name")
+}
+
+// Owner returns schedule owner.
+func (j *ScheduledJob) Owner() security.SQLUsername {
+	return j.rec.Owner
+}
+
+// SetOwner updates schedule owner.
+func (j *ScheduledJob) SetOwner(owner security.SQLUsername) {
+	j.rec.Owner = owner
+	j.markDirty("owner")
 }
 
 // NextRun returns the next time this schedule supposed to execute.
@@ -137,7 +182,9 @@ func (j *ScheduledJob) Frequency() (time.Duration, error) {
 	}
 	expr, err := cronexpr.Parse(j.rec.ScheduleExpr)
 	if err != nil {
-		return 0, errors.Wrapf(err, "parsing schedule expression: %q", j.rec.ScheduleExpr)
+		return 0, errors.Wrapf(err,
+			"parsing schedule expression: %q; it must be a valid cron expression",
+			j.rec.ScheduleExpr)
 	}
 	next := expr.Next(j.env.Now())
 	nextNext := expr.Next(next)
@@ -175,37 +222,37 @@ func (j *ScheduledJob) SetScheduleDetails(details jobspb.ScheduleDetails) {
 	j.markDirty("schedule_details")
 }
 
-// AddScheduleChangeReason adds change information to this job.
-// Arguments are interpreted same as printf.
-// If there are too many changes already recorded, trims older changes.
-func (j *ScheduledJob) AddScheduleChangeReason(reasonFmt string, args ...interface{}) {
-	if len(j.rec.ScheduleChanges.Changes) > 10 {
-		j.rec.ScheduleChanges.Changes = j.rec.ScheduleChanges.Changes[1:]
+// SetScheduleStatus sets schedule status.
+func (j *ScheduledJob) SetScheduleStatus(fmtOrMsg string, args ...interface{}) {
+	if len(args) == 0 {
+		j.rec.ScheduleState.Status = fmtOrMsg
+	} else {
+		j.rec.ScheduleState.Status = fmt.Sprintf(fmtOrMsg, args...)
 	}
+	j.markDirty("schedule_state")
+}
 
-	j.rec.ScheduleChanges.Changes = append(
-		j.rec.ScheduleChanges.Changes,
-		jobspb.ScheduleChangeInfo_Change{
-			Time:   j.env.Now().UnixNano(),
-			Reason: fmt.Sprintf(reasonFmt, args...),
-		})
-	j.markDirty("schedule_changes")
+// ScheduleStatus returns schedule status.
+func (j *ScheduledJob) ScheduleStatus() string {
+	return j.rec.ScheduleState.Status
+}
+
+// ClearScheduleStatus clears schedule status.
+func (j *ScheduledJob) ClearScheduleStatus() {
+	j.rec.ScheduleState.Status = ""
+	j.markDirty("schedule_state")
+}
+
+// ScheduleExpr returns the schedule expression for this schedule.
+func (j *ScheduledJob) ScheduleExpr() string {
+	return j.rec.ScheduleExpr
 }
 
 // Pause pauses this schedule.
-func (j *ScheduledJob) Pause(reason string) {
+// Use ScheduleNextRun to unpause.
+func (j *ScheduledJob) Pause() {
 	j.rec.NextRun = time.Time{}
 	j.markDirty("next_run")
-	j.AddScheduleChangeReason(reason)
-}
-
-// Unpause resumes running this schedule.
-func (j *ScheduledJob) Unpause(reason string) error {
-	if err := j.SetSchedule(j.rec.ScheduleExpr); err != nil {
-		return err
-	}
-	j.AddScheduleChangeReason(reason)
-	return nil
 }
 
 // SetExecutionDetails sets execution specific fields for this schedule.
@@ -215,8 +262,13 @@ func (j *ScheduledJob) SetExecutionDetails(executor string, args jobspb.Executio
 	j.markDirty("executor_type", "execution_args")
 }
 
+// ClearDirty clears the dirty map making this object appear as if it was just loaded.
+func (j *ScheduledJob) ClearDirty() {
+	j.dirty = make(map[string]struct{})
+}
+
 // InitFromDatums initializes this ScheduledJob object based on datums and column names.
-func (j *ScheduledJob) InitFromDatums(datums []tree.Datum, cols []sqlbase.ResultColumn) error {
+func (j *ScheduledJob) InitFromDatums(datums []tree.Datum, cols []colinfo.ResultColumn) error {
 	if len(datums) != len(cols) {
 		return errors.Errorf(
 			"datums length != columns length: %d != %d", len(datums), len(cols))
@@ -259,8 +311,25 @@ func (j *ScheduledJob) InitFromDatums(datums []tree.Datum, cols []sqlbase.Result
 			// But, be paranoid and double check.
 			rv := reflect.ValueOf(native)
 			if !rv.Type().AssignableTo(field.Type()) {
-				return errors.Newf("value of type %T cannot be assigned to %s",
-					native, field.Type().String())
+				// Is this the owner field? This needs special treatment.
+				ok := false
+				if col.Name == "owner" {
+					// The owner field has type SQLUsername, but the datum is a
+					// simple string.  So we need to convert.
+					//
+					// TODO(someone): We need a more generic mechanism than this
+					// naive go reflect stuff here.
+					var s string
+					s, ok = native.(string)
+					if ok {
+						// Replace the value by one of the right type.
+						rv = reflect.ValueOf(security.MakeSQLUsernameFromPreNormalizedString(s))
+					}
+				}
+				if !ok {
+					return errors.Newf("value of type %T cannot be assigned to %s",
+						native, field.Type().String())
+				}
 			}
 			field.Set(rv)
 		}
@@ -294,7 +363,7 @@ func (j *ScheduledJob) Create(ctx context.Context, ex sqlutil.InternalExecutor, 
 	}
 
 	rows, retCols, err := ex.QueryWithCols(ctx, "sched-create", txn,
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		fmt.Sprintf("INSERT INTO %s (%s) VALUES(%s) RETURNING schedule_id",
 			j.env.ScheduledJobsTableName(), strings.Join(cols, ","), generatePlaceholders(len(qargs))),
 		qargs...,
@@ -332,7 +401,7 @@ func (j *ScheduledJob) Update(ctx context.Context, ex sqlutil.InternalExecutor, 
 	}
 
 	n, err := ex.ExecEx(ctx, "sched-update", txn,
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		fmt.Sprintf("UPDATE %s SET (%s) = (%s) WHERE schedule_id = %d",
 			j.env.ScheduledJobsTableName(), strings.Join(cols, ","),
 			generatePlaceholders(len(qargs)), j.ScheduleID()),
@@ -364,15 +433,17 @@ func (j *ScheduledJob) marshalChanges() ([]string, []interface{}, error) {
 
 		switch col {
 		case `schedule_name`:
-			arg = tree.NewDString(j.rec.ScheduleName)
+			arg = tree.NewDString(j.rec.ScheduleLabel)
 		case `owner`:
-			arg = tree.NewDString(j.rec.Owner)
+			arg = tree.NewDString(j.rec.Owner.Normalized())
 		case `next_run`:
 			if (j.rec.NextRun == time.Time{}) {
 				arg = tree.DNull
 			} else {
 				arg, err = tree.MakeDTimestampTZ(j.rec.NextRun, time.Microsecond)
 			}
+		case `schedule_state`:
+			arg, err = marshalProto(&j.rec.ScheduleState)
 		case `schedule_expr`:
 			arg = tree.NewDString(j.rec.ScheduleExpr)
 		case `schedule_details`:
@@ -381,8 +452,6 @@ func (j *ScheduledJob) marshalChanges() ([]string, []interface{}, error) {
 			arg = tree.NewDString(j.rec.ExecutorType)
 		case `execution_args`:
 			arg, err = marshalProto(&j.rec.ExecutionArgs)
-		case `schedule_changes`:
-			arg, err = marshalProto(&j.rec.ScheduleChanges)
 		default:
 			return nil, nil, errors.Newf("cannot marshal column %q", col)
 		}

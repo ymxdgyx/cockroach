@@ -35,26 +35,23 @@ SET vectorize = on
 statement ok
 SET distsql = on
 
-statement ok
-SET vectorize_row_count_threshold = 0
+query T
+SELECT url FROM [EXPLAIN ANALYZE (DISTSQL) SELECT a FROM a]
+----
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyMkMFK80AUhff_Uwxn9QsjJi5czKpVI4TGtjZF1JLFNLnUQDozzkzAUvJYvoBPJslEQURweb5z5ty59wj30kAgT7Lkas1a27Cb1eKWbZKHZTZN52w6n2aPTwn7f53m6_wuO2FjVIagLMChdEVzuScHsUGMgsNYXZJz2vboOATS6hUi4qiVaX2PC45SW4I4wte-IQis5bahFcmK7FkEjoq8rJuhVk6MrffSHsCRG6mcYKfgWLResEkMjtk98_WeBIve31zQpVaelK-1-mH51jTkmCVZCXbOo2is2B78F44v2Ky-BMdW-vKZHNOtN_28_mtjwScKFUXHEci4oPNyRxBxx_9-hBU5o5Wjb_v_1hx1BQdVOwqHdrq1JS2tLocxQS6GdwOoyPngxkGkKlhd0f37CAAA__81VadX
 
 query T
-SELECT url FROM [EXPLAIN ANALYZE SELECT a FROM a]
+SELECT url FROM [EXPLAIN ANALYZE (DISTSQL) SELECT c.a FROM c JOIN d ON d.b = c.b]
 ----
-https://cockroachdb.github.io/distsqlplan/decode.html#eJyMkLFOwzAQhneewvonkAw4jJ5aQZAihbY0HYAqg5ucSiQ3DvYFUVV5d5S4AwxIjPfd9599d0L4sNAo0jy934jeW_G4Xj6JbfqyyufZQswX8_z1LRWXD1mxKZ7zK3FWTRRNCYnW1bQwBwrQWyQoJTrvKgrB-RGdJiGrv6CVRNN2PY-4lKicJ-gTuGFL0NiYnaU1mZr8rYJETWwaO401s843B-OPkCg60wYtriGx7FmLWQKJneHqnYJwPXcjHPPcd_YHulNqNANZqrj5bPiohbpRoxnYWCu4OZAWKqAcJGLq_NPAZk_QySD_v82aQufaQL8W-WuyGkoJqvcULxZc7ytaeVdNz8RyOeUmUFPg2E1ikbWxNZTDxXcAAAD__70-lf0=
+https://cockroachdb.github.io/distsqlplan/decode.html#eJycksGO0zAQhu88xeg_gWSWpgcOlpBaoEhdQrK0FQJWOTj2aAmkdrAdaVdVH4sX4MlQ4oBYyiLgOP_M75n_kw8In1tIbFf56tmOet_Si035ii5Xby_y5bqgZbHM371f0f3n6-1u-zp_QNOoPlNpVNN5uS7IUFmQOavpCemzuoKAdYYLtecAeYkMlUDnneYQnB-kwziwNteQM4HGdn0c5EpAO8-QB8QmtgyJnapb3rAy7B_NIGA4qqYdn9WLwBoC207ZIOkhBMo-SlpkYjGHwMs3FJs9S5p9_RJSrZ2NbGPj7Ekr9l3LgTwrI2my1zfxh5Q9pqcQqFXUHziQ62M3LBtumqzfpTmqo0CqplQhqiuGzI7i75Ofu8ZOwbPbwc2i881e-RsI5M596jv66BpLzkoak08YMC2YsqVYSQlRte0pg__Elf0OggBfs-5P3acI7-I1_xdeGw6ds4Fvsbrr5dmxEmBzxek3Btd7zRfe6XFNKsvRNwqGQ0zdLBVrm1rDgT-bsz-a57-Yq-O9bwEAAP__Drsj2Q==
 
 query T
-SELECT url FROM [EXPLAIN ANALYZE SELECT c.a FROM c JOIN d ON d.b = c.b]
+SELECT url FROM [EXPLAIN ANALYZE (DISTSQL) SELECT c.a FROM c INNER MERGE JOIN d ON c.a = d.b]
 ----
-https://cockroachdb.github.io/distsqlplan/decode.html#eJykUk2v0zAQvPMrVnsCyZSkR0tIraBIeQrJo-0BeMrBtVcPg2sHrwN9qvLfUT6EWhBf4rizM-uZkc_Inx1K3G3KzYs9dNHBq239Gu42b2_LdVHBulqX795v4PHLYrffvSmfwEzVCzVRNdzURQUG6grM4gDPQS8ODQr0wVCljsQo7zDHRmAbgybmEAfoPBIKc0KZCbS-7dIANwJ1iITyjMkmRyhxrw6OtqQMxWcZCjSUlHXjWb1i0ihw1yrPEp6iwLpLEla5WC1R4EEl_YEYQpfaAR_kqWvdBTTQmBzpZL_Y9CAhW2QDjZNyDpI9koSMsekFTpLZJSd1TyjzXvx9kptg_Rwkvw5iVm20RxUfUGAZwqeuhY_BeghewphkjoUCY_jKEEmZ2fu1z8GAoRNcsPLv4E_c_-iHTqS7ZIP_c0fLf-loS9wGz3TVz68uZ30jkMw9TT-KQxc13cagx2emsR51I2CI07TNp6Hw02oweCnOfyte_iBu-kffAgAA__9yLQzl
-
-query T
-SELECT url FROM [EXPLAIN ANALYZE SELECT c.a FROM c INNER MERGE JOIN d ON c.a = d.b]
-----
-https://cockroachdb.github.io/distsqlplan/decode.html#eJy8klFr2zAUhd_3Ky73qWVaartvgkLC5g2XxO6cPGwrflCku1SgWJ4kj5aQ_z4sF1aXrqVj7M06Op-sc64O6H8Y5LjOl_n7DfTOwMe6WsF1_uVquShKWJSL5ddvOZx8KNab9eflKdxb5UyMVglFWeY1rPL6Uw6XVVGCgqqMhgtQs22DDFurqBR78sivMcWGYeesJO-tG6RDNBTqFnnCULddHwa5YSitI-QHDDoYQo4bsTVUk1DkzhJkqCgIbeKxct45vRfuDhmuO9F6Du-QYdUHDvMUGW5FkDfkwfahG8SBD31nHkgZMvRkSAb9U4c7DsksGWw-CGMg6D1xSDw2R4Yjcn9NH8SOkKdH9ndR0mkU9VyU7L9Eyf4Y5XeCvrVOkSM1uX0zkC9ZnuhjRW5Hl1a35M6yaR-GvoeTefr29MLp3c34-a9GS7ck-6Bt-3In568Zb02-s62nx908eXIyFEJqR2PB3vZO0pWzMv5mXFaRi4IiH8bdbFwUbdyK7-8hnL4Czh7D2bPw-QROjs3xza8AAAD__9KSYx8=
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzMUt1u0zAUvucpjs7VJsyWZBIXliatQEAZbTLSCgFTLlz70EUkdrAdqVXVx-IFeDKUpPxkHUODG-5yvh873-ezRfe5Qo7zeBo_X0BrK3iZZzO4jt9dTSdJCpN0Mn3_IYajF8l8MX8zPYa9VJ6IQSohSdM4h1mcv4rhMktSUJClveAc1MmyQIbaKEpFTQ75NYZYMGyskeScsR207QWJWiMPGJa6aX0HFwylsYR8i770FSHHhVhWlJNQZE8DZKjIi7Lqj5UXjS1rYTfIcN4I7Tg8QYZZ6zlchMjw9VvwZU0cgq9f3DBLoz1pXxp9QPm2qciBJaE4RAO23PgfUPgUniHDpfDyhhyY1jfdTd1P7a3foQiLHcNh2sdyXqwIebhjfxc9HEdX90WP_svo0W-j_0zcamMVWVKjtEXn_JPkjv5mZFd0aUpN9jQa91fRR390ET4-Prfl6mb4HK0OrUm2h13VYg011cZuQFSVkcKT4hD07XSck7brCFTpPh0q_qm_s4esTk6uMdrR7R7vPDnoyiO1ouExnGmtpCtrZH_NMGa9rwcUOT-w0TAkuqf63f7VHD7AHN02R_eaz0bmYFfsHn0LAAD__4kxkjU=
 
 statement ok
-RESET vectorize; RESET distsql; RESET vectorize_row_count_threshold
+RESET vectorize; RESET distsql
 
 statement ok
 SET tracing=off
@@ -104,7 +101,9 @@ EXPLAIN (VEC) SELECT stddev(0) FROM t46123 WHERE ('' COLLATE en)::BOOL
 └ Node 1
   └ *colexec.orderedAggregator
     └ *colexec.distinctChainOps
-      └ *rowexec.tableReader
+      └ *colexec.constInt64Op
+        └ *rowexec.filtererProcessor
+          └ *colfetcher.ColBatchScan
 
 # Regression test for #46122 (checking that we gracefully fallback to row
 # execution on cross joins).

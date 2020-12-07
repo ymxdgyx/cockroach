@@ -12,6 +12,7 @@ package base
 
 import (
 	"context"
+	"net"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -44,6 +45,13 @@ type TestServerArgs struct {
 	// is always set to true when the server is started via a TestCluster.
 	PartOfCluster bool
 
+	// Listener (if nonempty) is the listener to use for all incoming RPCs.
+	// If a listener is installed, it informs the RPC `Addr` used below. The
+	// Server itself knows to close it out. This is useful for when a test wants
+	// manual control over how the join flags (`JoinAddr`) are populated, and
+	// installs listeners manually to know which addresses to point to.
+	Listener net.Listener
+
 	// Addr (if nonempty) is the RPC address to use for the test server.
 	Addr string
 	// SQLAddr (if nonempty) is the SQL address to use for the test server.
@@ -60,7 +68,7 @@ type TestServerArgs struct {
 	// JoinAddr is the address of a node we are joining.
 	//
 	// If left empty and the TestServer is being added to a nonempty cluster, this
-	// will be set to the the address of the cluster's first node.
+	// will be set to the address of the cluster's first node.
 	JoinAddr string
 
 	// StoreSpecs define the stores for this server. If you want more than
@@ -117,6 +125,9 @@ type TestServerArgs struct {
 	// If set, web session authentication will be disabled, even if the server
 	// is running in secure mode.
 	DisableWebSessionAuthentication bool
+
+	// If set, testing specific descriptor validation will be disabled. even if the server
+	DisableTestingDescriptorValidation bool
 }
 
 // TestClusterArgs contains the parameters one can set when creating a test
@@ -141,6 +152,8 @@ type TestClusterArgs struct {
 	// map. The map's key is an index within TestCluster.Servers. If there is
 	// no entry in the map for a particular server, the default ServerArgs are
 	// used.
+	//
+	// These are indexes: the key 0 corresponds to the first node.
 	//
 	// A copy of an entry from this map will be copied to each individual server
 	// and potentially adjusted according to ReplicationMode.
@@ -180,6 +193,7 @@ func DefaultTestTempStorageConfigWithSize(
 	return TempStorageConfig{
 		InMemory: true,
 		Mon:      monitor,
+		Settings: st,
 	}
 }
 
@@ -195,9 +209,9 @@ const (
 	// If ReplicationAuto is used, StartTestCluster() blocks until the initial
 	// ranges are fully replicated.
 	ReplicationAuto TestClusterReplicationMode = iota
-	// ReplicationManual means that the split and replication queues of all
-	// servers are stopped, and the test must manually control splitting and
-	// replication through the TestServer.
+	// ReplicationManual means that the split, merge and replication queues of all
+	// servers are stopped, and the test must manually control splitting, merging
+	// and  replication through the TestServer.
 	// Note that the server starts with a number of system ranges,
 	// all with a single replica on node 1.
 	ReplicationManual
@@ -207,9 +221,6 @@ const (
 // TestServer.
 type TestTenantArgs struct {
 	TenantID roachpb.TenantID
-
-	// TenantInfo is the metadata used if creating a tenant.
-	TenantInfo []byte
 
 	// Existing, if true, indicates an existing tenant, rather than a new tenant
 	// to be created by StartTenant.
@@ -222,4 +233,12 @@ type TestTenantArgs struct {
 	// TenantIDCodecOverride overrides the tenant ID used to construct the SQL
 	// server's codec, but nothing else (e.g. its certs). Used for testing.
 	TenantIDCodecOverride roachpb.TenantID
+
+	// Stopper, if not nil, is used to stop the tenant manually otherwise the
+	// TestServer stopper will be used.
+	Stopper *stop.Stopper
+
+	// DeterministicExplainAnalyze, if set, will result in overriding fields in
+	// EXPLAIN ANALYZE (PLAN) that can vary between runs (like elapsed times).
+	DeterministicExplainAnalyze bool
 }

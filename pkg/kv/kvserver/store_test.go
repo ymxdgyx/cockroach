@@ -39,12 +39,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
@@ -56,8 +55,8 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/raft"
-	"go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 	"golang.org/x/time/rate"
 )
 
@@ -244,7 +243,7 @@ func createTestStoreWithoutStart(
 		t.Fatal(err)
 	}
 	var splits []roachpb.RKey
-	kvs, tableSplits := sqlbase.MakeMetadataSchema(
+	kvs, tableSplits := bootstrap.MakeMetadataSchema(
 		keys.SystemSQLCodec, cfg.DefaultZoneConfig, cfg.DefaultSystemZoneConfig,
 	).GetInitialValues()
 	if opts.createSystemRanges {
@@ -395,12 +394,8 @@ func TestIterateIDPrefixKeys(t *testing.T) {
 	var seen []seenT
 	var tombstone roachpb.RangeTombstone
 
-	handleTombstone := func(c iterutil.Cur) error {
-		rangeID, ok := c.Elem.(*roachpb.RangeID)
-		if !ok {
-			return errors.Newf("unexpected type %T for iterator element; expected %T", c.Elem, rangeID)
-		}
-		seen = append(seen, seenT{rangeID: *rangeID, tombstone: tombstone})
+	handleTombstone := func(rangeID roachpb.RangeID) error {
+		seen = append(seen, seenT{rangeID: rangeID, tombstone: tombstone})
 		return nil
 	}
 
@@ -466,7 +461,7 @@ func TestStoreInitAndBootstrap(t *testing.T) {
 
 		// Bootstrap the system ranges.
 		var splits []roachpb.RKey
-		kvs, tableSplits := sqlbase.MakeMetadataSchema(
+		kvs, tableSplits := bootstrap.MakeMetadataSchema(
 			keys.SystemSQLCodec, cfg.DefaultZoneConfig, cfg.DefaultSystemZoneConfig,
 		).GetInitialValues()
 		splits = config.StaticSplits()
@@ -525,7 +520,7 @@ func TestInitializeEngineErrors(t *testing.T) {
 	require.NoError(t, WriteClusterVersion(ctx, eng, clusterversion.TestingClusterVersion))
 
 	// Put some random garbage into the engine.
-	require.NoError(t, eng.Put(storage.MakeMVCCMetadataKey(roachpb.Key("foo")), []byte("bar")))
+	require.NoError(t, eng.PutUnversioned(roachpb.Key("foo"), []byte("bar")))
 
 	cfg := TestStoreConfig(nil)
 	cfg.Transport = NewDummyRaftTransport(cfg.Settings)
@@ -727,7 +722,7 @@ func TestStoreRemoveReplicaDestroy(t *testing.T) {
 	}
 
 	st := &kvserverpb.LeaseStatus{Timestamp: repl1.Clock().Now()}
-	if err = repl1.checkExecutionCanProceed(ctx, &roachpb.BatchRequest{}, nil /* g */, st); !errors.Is(err, expErr) {
+	if _, err = repl1.checkExecutionCanProceed(ctx, &roachpb.BatchRequest{}, nil /* g */, st); !errors.Is(err, expErr) {
 		t.Fatalf("expected error %s, but got %v", expErr, err)
 	}
 }
@@ -848,37 +843,60 @@ func TestStoreVisitReplicasByKey(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Query for all ranges.
-	visited := make([]roachpb.RSpan, 0)
-	s.VisitReplicasByKey(ctx, roachpb.RKeyMin, roachpb.RKeyMax, func(_ context.Context, r KeyRange) bool {
-		visited = append(visited, r.Desc().RSpan())
-		return true
-	})
-	require.Equal(t, ranges, visited)
+	tests := []struct {
+		name       string
+		start, end roachpb.RKey
+		exp        []roachpb.RSpan
+	}{
+		{
+			name:  "all ranges",
+			start: roachpb.RKeyMin,
+			end:   roachpb.RKeyMax,
+			exp:   ranges,
+		},
+		{
+			name:  "some ranges",
+			start: ranges[3].Key,
+			end:   ranges[6].EndKey,
+			exp:   ranges[3:7],
+		},
+		{
+			name:  "some ranges, inexact boundaries",
+			start: ranges[3].Key.Next(),
+			end:   ranges[6].Key.Next(),
+			exp:   ranges[3:7],
+		},
+		{
+			name:  "within range",
+			start: ranges[6].Key.Next(),
+			end:   ranges[6].Key.Next().Next(),
+			exp:   ranges[6:7],
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Iterate ascendingly.
+			var visited []roachpb.RSpan
+			s.VisitReplicasByKey(ctx, tc.start, tc.end, AscendingKeyOrder, func(_ context.Context, r KeyRange) bool {
+				visited = append(visited, r.Desc().RSpan())
+				return true
+			})
+			require.Equal(t, tc.exp, visited, tc.exp)
 
-	// Query for some of the ranges.
-	visited = visited[:0]
-	s.VisitReplicasByKey(ctx, ranges[3].Key, ranges[6].EndKey, func(_ context.Context, r KeyRange) bool {
-		visited = append(visited, r.Desc().RSpan())
-		return true
-	})
-	require.Equal(t, ranges[3:7], visited)
-
-	// Like above, but don't use exact boundaries.
-	visited = visited[:0]
-	s.VisitReplicasByKey(ctx, ranges[3].Key.Next(), ranges[6].Key.Next(), func(_ context.Context, r KeyRange) bool {
-		visited = append(visited, r.Desc().RSpan())
-		return true
-	})
-	require.Equal(t, ranges[3:7], visited)
-
-	// Query within a single range.
-	visited = visited[:0]
-	s.VisitReplicasByKey(ctx, ranges[6].Key.Next(), ranges[6].Key.Next(), func(_ context.Context, r KeyRange) bool {
-		visited = append(visited, r.Desc().RSpan())
-		return true
-	})
-	require.Equal(t, ranges[6:7], visited)
+			// Iterate descendingly.
+			visited = visited[:0]
+			s.VisitReplicasByKey(ctx, tc.start, tc.end, DescendingKeyOrder, func(_ context.Context, r KeyRange) bool {
+				visited = append(visited, r.Desc().RSpan())
+				return true
+			})
+			// Reverse the expected values.
+			exp := make([]roachpb.RSpan, len(tc.exp))
+			for i, sp := range tc.exp {
+				exp[len(exp)-i-1] = sp
+			}
+			require.Equal(t, exp, visited)
+		})
+	}
 }
 
 func TestHasOverlappingReplica(t *testing.T) {
@@ -1116,19 +1134,13 @@ func TestStoreObservedTimestamp(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	badKey := []byte("a")
 	goodKey := []byte("b")
-	desc := roachpb.ReplicaDescriptor{
-		NodeID: 5,
-		// not relevant
-		StoreID:   1,
-		ReplicaID: 2,
-	}
 
 	testCases := []struct {
 		key   roachpb.Key
-		check func(int64, roachpb.Response, *roachpb.Error)
+		check func(int64, roachpb.NodeID, roachpb.Response, *roachpb.Error)
 	}{
 		{badKey,
-			func(wallNanos int64, _ roachpb.Response, pErr *roachpb.Error) {
+			func(wallNanos int64, nodeID roachpb.NodeID, _ roachpb.Response, pErr *roachpb.Error) {
 				if pErr == nil {
 					t.Fatal("expected an error")
 				}
@@ -1136,18 +1148,18 @@ func TestStoreObservedTimestamp(t *testing.T) {
 				if txn == nil || txn.ID == (uuid.UUID{}) {
 					t.Fatalf("expected nontrivial transaction in %s", pErr)
 				}
-				if ts, _ := txn.GetObservedTimestamp(desc.NodeID); ts.WallTime != wallNanos {
+				if ts, _ := txn.GetObservedTimestamp(nodeID); ts.WallTime != wallNanos {
 					t.Fatalf("unexpected observed timestamps, expected %d->%d but got map %+v",
-						desc.NodeID, wallNanos, txn.ObservedTimestamps)
+						nodeID, wallNanos, txn.ObservedTimestamps)
 				}
-				if pErr.OriginNode != desc.NodeID {
+				if pErr.OriginNode != nodeID {
 					t.Fatalf("unexpected OriginNode %d, expected %d",
-						pErr.OriginNode, desc.NodeID)
+						pErr.OriginNode, nodeID)
 				}
 
 			}},
 		{goodKey,
-			func(wallNanos int64, pReply roachpb.Response, pErr *roachpb.Error) {
+			func(wallNanos int64, nodeID roachpb.NodeID, pReply roachpb.Response, pErr *roachpb.Error) {
 				if pErr != nil {
 					t.Fatal(pErr)
 				}
@@ -1155,7 +1167,7 @@ func TestStoreObservedTimestamp(t *testing.T) {
 				if txn == nil || txn.ID == (uuid.UUID{}) {
 					t.Fatal("expected transactional response")
 				}
-				obs, _ := txn.GetObservedTimestamp(desc.NodeID)
+				obs, _ := txn.GetObservedTimestamp(nodeID)
 				if act, exp := obs.WallTime, wallNanos; exp != act {
 					t.Fatalf("unexpected observed wall time: %d, wanted %d", act, exp)
 				}
@@ -1178,14 +1190,11 @@ func TestStoreObservedTimestamp(t *testing.T) {
 			store := createTestStoreWithConfig(t, stopper, testStoreOpts{createSystemRanges: true}, &cfg)
 			txn := newTransaction("test", test.key, 1, store.cfg.Clock)
 			txn.MaxTimestamp = hlc.MaxTimestamp
+			h := roachpb.Header{Txn: txn}
 			pArgs := putArgs(test.key, []byte("value"))
-			h := roachpb.Header{
-				Txn:     txn,
-				Replica: desc,
-			}
 			assignSeqNumsForReqs(txn, &pArgs)
 			pReply, pErr := kv.SendWrappedWith(context.Background(), store.TestSender(), h, &pArgs)
-			test.check(manual.UnixNano(), pReply, pErr)
+			test.check(manual.UnixNano(), store.NodeID(), pReply, pErr)
 		}()
 	}
 }
@@ -1213,7 +1222,7 @@ func TestStoreAnnotateNow(t *testing.T) {
 				if pErr == nil {
 					t.Fatal("expected an error")
 				}
-				if pErr.Now == (hlc.Timestamp{}) {
+				if pErr.Now.IsEmpty() {
 					t.Fatal("timestamp not annotated on error")
 				}
 			}},
@@ -1222,7 +1231,7 @@ func TestStoreAnnotateNow(t *testing.T) {
 				if pErr != nil {
 					t.Fatal(pErr)
 				}
-				if pReply.Now == (hlc.Timestamp{}) {
+				if pReply.Now.IsEmpty() {
 					t.Fatal("timestamp not annotated on batch response")
 				}
 			}},
@@ -3036,8 +3045,6 @@ func TestSendSnapshotThrottling(t *testing.T) {
 	defer e.Close()
 
 	ctx := context.Background()
-	var cfg base.RaftConfig
-	cfg.SetDefaults()
 	st := cluster.MakeTestingClusterSettings()
 
 	header := SnapshotRequest_Header{
@@ -3053,7 +3060,7 @@ func TestSendSnapshotThrottling(t *testing.T) {
 		sp := &fakeStorePool{}
 		expectedErr := errors.New("")
 		c := fakeSnapshotStream{nil, expectedErr}
-		err := sendSnapshot(ctx, &cfg, st, c, sp, header, nil, newBatch, nil)
+		err := sendSnapshot(ctx, st, c, sp, header, nil, newBatch, nil)
 		if sp.failedThrottles != 1 {
 			t.Fatalf("expected 1 failed throttle, but found %d", sp.failedThrottles)
 		}
@@ -3069,7 +3076,7 @@ func TestSendSnapshotThrottling(t *testing.T) {
 			Status: SnapshotResponse_DECLINED,
 		}
 		c := fakeSnapshotStream{resp, nil}
-		err := sendSnapshot(ctx, &cfg, st, c, sp, header, nil, newBatch, nil)
+		err := sendSnapshot(ctx, st, c, sp, header, nil, newBatch, nil)
 		if sp.declinedThrottles != 1 {
 			t.Fatalf("expected 1 declined throttle, but found %d", sp.declinedThrottles)
 		}
@@ -3086,7 +3093,7 @@ func TestSendSnapshotThrottling(t *testing.T) {
 			Status: SnapshotResponse_DECLINED,
 		}
 		c := fakeSnapshotStream{resp, nil}
-		err := sendSnapshot(ctx, &cfg, st, c, sp, header, nil, newBatch, nil)
+		err := sendSnapshot(ctx, st, c, sp, header, nil, newBatch, nil)
 		if sp.failedThrottles != 1 {
 			t.Fatalf("expected 1 failed throttle, but found %d", sp.failedThrottles)
 		}
@@ -3102,7 +3109,7 @@ func TestSendSnapshotThrottling(t *testing.T) {
 			Status: SnapshotResponse_ERROR,
 		}
 		c := fakeSnapshotStream{resp, nil}
-		err := sendSnapshot(ctx, &cfg, st, c, sp, header, nil, newBatch, nil)
+		err := sendSnapshot(ctx, st, c, sp, header, nil, newBatch, nil)
 		if sp.failedThrottles != 1 {
 			t.Fatalf("expected 1 failed throttle, but found %d", sp.failedThrottles)
 		}

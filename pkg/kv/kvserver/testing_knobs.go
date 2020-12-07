@@ -13,7 +13,9 @@ package kvserver
 import (
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tenantrate"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -30,6 +32,7 @@ type StoreTestingKnobs struct {
 	IntentResolverKnobs     kvserverbase.IntentResolverTestingKnobs
 	TxnWaitKnobs            txnwait.TestingKnobs
 	ConsistencyTestingKnobs ConsistencyTestingKnobs
+	TenantRateKnobs         tenantrate.TestingKnobs
 
 	// TestingRequestFilter is called before evaluating each request on a
 	// replica. The filter is run before the request acquires latches, so
@@ -244,7 +247,35 @@ type StoreTestingKnobs struct {
 	// RangeFeedPushTxnsAge overrides the default value for
 	// rangefeed.Config.PushTxnsAge.
 	RangeFeedPushTxnsAge time.Duration
+	// AllowLeaseProposalWhenNotLeader, if set, makes the proposal buffer allow
+	// lease request proposals even when the replica inserting that proposal is
+	// not the Raft leader. This can be used in tests to allow a replica to
+	// acquire a lease without first moving the Raft leadership to it (e.g. it
+	// allows tests to expire leases by stopping the old leaseholder's liveness
+	// heartbeats and then expect other replicas to take the lease without
+	// worrying about Raft).
+	AllowLeaseRequestProposalsWhenNotLeader bool
+	// AllowDangerousReplicationChanges disables safeguards
+	// in execChangeReplicasTxn that prevent moving
+	// to a configuration that cannot make progress.
+	AllowDangerousReplicationChanges bool
 }
 
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.
 func (*StoreTestingKnobs) ModuleTestingKnobs() {}
+
+// NodeLivenessTestingKnobs allows tests to override some node liveness
+// controls. When set, fields ultimately affect the NodeLivenessOptions used by
+// the cluster.
+type NodeLivenessTestingKnobs struct {
+	// LivenessDuration overrides a liveness record's life time.
+	LivenessDuration time.Duration
+	// RenewalDuration specifies how long before the expiration a record is
+	// heartbeated. If LivenessDuration is set, this should probably be set too.
+	RenewalDuration time.Duration
+}
+
+var _ base.ModuleTestingKnobs = NodeLivenessTestingKnobs{}
+
+// ModuleTestingKnobs implements the base.ModuleTestingKnobs interface.
+func (NodeLivenessTestingKnobs) ModuleTestingKnobs() {}

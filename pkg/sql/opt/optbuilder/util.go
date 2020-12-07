@@ -11,6 +11,7 @@
 package optbuilder
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
@@ -19,7 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/errors"
@@ -256,7 +257,7 @@ func (b *Builder) addColumn(scope *scope, alias string, expr tree.TypedExpr) *sc
 	return &scope.cols[len(scope.cols)-1]
 }
 
-func (b *Builder) synthesizeResultColumns(scope *scope, cols sqlbase.ResultColumns) {
+func (b *Builder) synthesizeResultColumns(scope *scope, cols colinfo.ResultColumns) {
 	for i := range cols {
 		c := b.synthesizeColumn(scope, cols[i].Name, cols[i].Typ, nil /* expr */, nil /* scalar */)
 		if cols[i].Hidden {
@@ -548,10 +549,10 @@ func (b *Builder) resolveTableForMutation(
 func (b *Builder) resolveTable(
 	tn *tree.TableName, priv privilege.Kind,
 ) (cat.Table, tree.TableName) {
-	ds, resName := b.resolveDataSource(tn, priv)
+	ds, _, resName := b.resolveDataSource(tn, priv)
 	tab, ok := ds.(cat.Table)
 	if !ok {
-		panic(sqlbase.NewWrongObjectTypeError(tn, "table"))
+		panic(sqlerrors.NewWrongObjectTypeError(tn, "table"))
 	}
 	return tab, resName
 }
@@ -560,23 +561,24 @@ func (b *Builder) resolveTable(
 // TableRef spec. If the name does not resolve to a table, or if the current
 // user does not have the given privilege, then resolveTableRef raises an error.
 func (b *Builder) resolveTableRef(ref *tree.TableRef, priv privilege.Kind) cat.Table {
-	ds := b.resolveDataSourceRef(ref, priv)
+	ds, _ := b.resolveDataSourceRef(ref, priv)
 	tab, ok := ds.(cat.Table)
 	if !ok {
-		panic(sqlbase.NewWrongObjectTypeError(ref, "table"))
+		panic(sqlerrors.NewWrongObjectTypeError(ref, "table"))
 	}
 	return tab
 }
 
-// resolveDataSource returns the data source in the catalog with the given name.
-// If the name does not resolve to a table, or if the current user does not have
-// the given privilege, then resolveDataSource raises an error.
+// resolveDataSource returns the data source in the catalog with the given name,
+// along with the table's MDDepName and data source name. If the name does not
+// resolve to a table, or if the current user does not have the given privilege,
+// then resolveDataSource raises an error.
 //
 // If the b.qualifyDataSourceNamesInAST flag is set, tn is updated to contain
 // the fully qualified name.
 func (b *Builder) resolveDataSource(
 	tn *tree.TableName, priv privilege.Kind,
-) (cat.DataSource, cat.DataSourceName) {
+) (cat.DataSource, opt.MDDepName, cat.DataSourceName) {
 	var flags cat.Flags
 	if b.insideViewDef {
 		// Avoid taking table leases when we're creating a view.
@@ -586,21 +588,24 @@ func (b *Builder) resolveDataSource(
 	if err != nil {
 		panic(err)
 	}
-	b.checkPrivilege(opt.DepByName(tn), ds, priv)
+	depName := opt.DepByName(tn)
+	b.checkPrivilege(depName, ds, priv)
 
 	if b.qualifyDataSourceNamesInAST {
 		*tn = resName
 		tn.ExplicitCatalog = true
 		tn.ExplicitSchema = true
 	}
-	return ds, resName
+	return ds, depName, resName
 }
 
 // resolveDataSourceFromRef returns the data source in the catalog that matches
-// the given TableRef spec. If no data source matches, or if the current user
-// does not have the given privilege, then resolveDataSourceFromRef raises an
-// error.
-func (b *Builder) resolveDataSourceRef(ref *tree.TableRef, priv privilege.Kind) cat.DataSource {
+// the given TableRef spec, along with the table's MDDepName. If no data source
+// matches, or if the current user does not have the given privilege, then
+// resolveDataSourceFromRef raises an error.
+func (b *Builder) resolveDataSourceRef(
+	ref *tree.TableRef, priv privilege.Kind,
+) (cat.DataSource, opt.MDDepName) {
 	var flags cat.Flags
 	if b.insideViewDef {
 		// Avoid taking table leases when we're creating a view.
@@ -610,8 +615,9 @@ func (b *Builder) resolveDataSourceRef(ref *tree.TableRef, priv privilege.Kind) 
 	if err != nil {
 		panic(pgerror.Wrapf(err, pgcode.UndefinedObject, "%s", tree.ErrString(ref)))
 	}
-	b.checkPrivilege(opt.DepByID(cat.StableID(ref.TableID)), ds, priv)
-	return ds
+	depName := opt.DepByID(cat.StableID(ref.TableID))
+	b.checkPrivilege(depName, ds, priv)
+	return ds, depName
 }
 
 // checkPrivilege ensures that the current user has the privilege needed to
@@ -645,7 +651,8 @@ func resolveNumericColumnRefs(tab cat.Table, columns []tree.ColumnID) (ordinals 
 		ord := 0
 		cnt := tab.ColumnCount()
 		for ord < cnt {
-			if tab.Column(ord).ColID() == cat.StableID(c) && cat.IsSelectableColumn(tab, ord) {
+			col := tab.Column(ord)
+			if col.IsSelectable() && col.ColID() == cat.StableID(c) {
 				break
 			}
 			ord++
@@ -663,7 +670,8 @@ func resolveNumericColumnRefs(tab cat.Table, columns []tree.ColumnID) (ordinals 
 // returns -1.
 func findPublicTableColumnByName(tab cat.Table, name tree.Name) int {
 	for ord, n := 0, tab.ColumnCount(); ord < n; ord++ {
-		if tab.Column(ord).ColName() == name && !cat.IsMutationColumn(tab, ord) {
+		col := tab.Column(ord)
+		if col.ColName() == name && !col.IsMutation() {
 			return ord
 		}
 	}
@@ -679,8 +687,11 @@ type columnKinds struct {
 	// If true, include system columns.
 	includeSystem bool
 
-	// If true, include virtual columns.
-	includeVirtual bool
+	// If true, include virtual inverted index columns.
+	includeVirtualInverted bool
+
+	// If true, include virtual computed columns.
+	includeVirtualComputed bool
 }
 
 // tableOrdinals returns a slice of ordinals that correspond to table columns of
@@ -688,15 +699,16 @@ type columnKinds struct {
 func tableOrdinals(tab cat.Table, k columnKinds) []int {
 	n := tab.ColumnCount()
 	shouldInclude := [...]bool{
-		cat.Ordinary:   true,
-		cat.WriteOnly:  k.includeMutations,
-		cat.DeleteOnly: k.includeMutations,
-		cat.System:     k.includeSystem,
-		cat.Virtual:    k.includeVirtual,
+		cat.Ordinary:        true,
+		cat.WriteOnly:       k.includeMutations,
+		cat.DeleteOnly:      k.includeMutations,
+		cat.System:          k.includeSystem,
+		cat.VirtualInverted: k.includeVirtualInverted,
+		cat.VirtualComputed: k.includeVirtualComputed,
 	}
 	ordinals := make([]int, 0, n)
 	for i := 0; i < n; i++ {
-		if shouldInclude[tab.ColumnKind(i)] {
+		if shouldInclude[tab.Column(i).Kind()] {
 			ordinals = append(ordinals, i)
 		}
 	}

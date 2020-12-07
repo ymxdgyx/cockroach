@@ -15,8 +15,8 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/errors"
@@ -42,11 +42,15 @@ var HistogramClusterMode = settings.RegisterPublicBoolSetting(
 // known number of distinct values (distinctCount) among the buckets, in
 // proportion with the number of rows in each bucket.
 func EquiDepthHistogram(
-	evalCtx *tree.EvalContext, samples tree.Datums, numRows, distinctCount int64, maxBuckets int,
+	evalCtx *tree.EvalContext,
+	colType *types.T,
+	samples tree.Datums,
+	numRows, distinctCount int64,
+	maxBuckets int,
 ) (HistogramData, error) {
 	numSamples := len(samples)
 	if numSamples == 0 {
-		return HistogramData{}, nil
+		return HistogramData{ColumnType: colType}, nil
 	}
 	if maxBuckets < 2 {
 		return HistogramData{}, errors.Errorf("histogram requires at least two buckets")
@@ -101,7 +105,7 @@ func EquiDepthHistogram(
 		numEq := int64(num-numLess) * numRows / int64(numSamples)
 		numRange := int64(numLess) * numRows / int64(numSamples)
 		distinctRange := estimatedDistinctValuesInRange(float64(numRange), lowerBound, upper)
-		encoded, err := sqlbase.EncodeTableKey(nil, upper, encoding.Ascending)
+		encoded, err := rowenc.EncodeTableKey(nil, upper, encoding.Ascending)
 		if err != nil {
 			return HistogramData{}, err
 		}

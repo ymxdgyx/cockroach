@@ -14,21 +14,23 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/featureflag"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -47,7 +49,23 @@ var createStatsPostEvents = settings.RegisterPublicBoolSetting(
 	false,
 )
 
+// featureStatsEnabled is used to enable and disable the CREATE STATISTICS and
+// ANALYZE features.
+var featureStatsEnabled = settings.RegisterPublicBoolSetting(
+	"feature.stats.enabled",
+	"set to true to enable CREATE STATISTICS/ANALYZE, false to disable; default is true",
+	featureflag.FeatureFlagEnabledDefault)
+
 func (p *planner) CreateStatistics(ctx context.Context, n *tree.CreateStats) (planNode, error) {
+	if err := featureflag.CheckEnabled(
+		ctx,
+		featureStatsEnabled,
+		&p.ExecCfg().Settings.SV,
+		"ANALYZE/CREATE STATISTICS",
+	); err != nil {
+		return nil, err
+	}
+
 	return &createStatsNode{
 		CreateStats: *n,
 		p:           p,
@@ -56,11 +74,23 @@ func (p *planner) CreateStatistics(ctx context.Context, n *tree.CreateStats) (pl
 
 // Analyze is syntactic sugar for CreateStatistics.
 func (p *planner) Analyze(ctx context.Context, n *tree.Analyze) (planNode, error) {
+	if err := featureflag.CheckEnabled(
+		ctx,
+		featureStatsEnabled,
+		&p.ExecCfg().Settings.SV,
+		"ANALYZE/CREATE STATISTICS",
+	); err != nil {
+		return nil, err
+	}
+
 	return &createStatsNode{
 		CreateStats: tree.CreateStats{Table: n.Table},
 		p:           p,
 	}, nil
 }
+
+const defaultHistogramBuckets = 200
+const nonIndexColHistogramBuckets = 2
 
 // createStatsNode is a planNode implemented in terms of a function. The
 // startJob function starts a Job during Start, and the remainder of the
@@ -151,7 +181,7 @@ func (n *createStatsNode) startJob(ctx context.Context, resultsCh chan<- tree.Da
 // makeJobRecord creates a CreateStats job record which can be used to plan and
 // execute statistics creation.
 func (n *createStatsNode) makeJobRecord(ctx context.Context) (*jobs.Record, error) {
-	var tableDesc *ImmutableTableDescriptor
+	var tableDesc *tabledesc.Immutable
 	var fqTableName string
 	var err error
 	switch t := n.Table.(type) {
@@ -214,19 +244,21 @@ func (n *createStatsNode) makeJobRecord(ctx context.Context) (*jobs.Record, erro
 		if err != nil {
 			return nil, err
 		}
-		isInvIndex := sqlbase.ColumnTypeIsInvertedIndexable(col.Type)
+		isInvIndex := colinfo.ColumnTypeIsInvertedIndexable(col.Type)
 		colStats = []jobspb.CreateStatsDetails_ColStat{{
 			ColumnIDs: columnIDs,
 			// By default, create histograms on all explicitly requested column stats
 			// with a single column that doesn't use an inverted index.
-			HasHistogram: len(columnIDs) == 1 && !isInvIndex,
+			HasHistogram:        len(columnIDs) == 1 && !isInvIndex,
+			HistogramMaxBuckets: defaultHistogramBuckets,
 		}}
 		// Make histograms for inverted index column types.
 		if len(columnIDs) == 1 && isInvIndex {
 			colStats = append(colStats, jobspb.CreateStatsDetails_ColStat{
-				ColumnIDs:    columnIDs,
-				HasHistogram: true,
-				Inverted:     true,
+				ColumnIDs:           columnIDs,
+				HasHistogram:        true,
+				Inverted:            true,
+				HistogramMaxBuckets: defaultHistogramBuckets,
 			})
 		}
 	}
@@ -292,7 +324,7 @@ const maxNonIndexCols = 100
 // other columns from the table. We only collect histograms for index columns,
 // plus any other boolean or enum columns (where the "histogram" is tiny).
 func createStatsDefaultColumns(
-	desc *ImmutableTableDescriptor, multiColEnabled bool,
+	desc *tabledesc.Immutable, multiColEnabled bool,
 ) ([]jobspb.CreateStatsDetails_ColStat, error) {
 	colStats := make([]jobspb.CreateStatsDetails_ColStat, 0, len(desc.Indexes)+1)
 
@@ -322,8 +354,9 @@ func createStatsDefaultColumns(
 		}
 
 		colStat := jobspb.CreateStatsDetails_ColStat{
-			ColumnIDs:    colList,
-			HasHistogram: !isInverted,
+			ColumnIDs:           colList,
+			HasHistogram:        !isInverted,
+			HistogramMaxBuckets: defaultHistogramBuckets,
 		}
 		colStats = append(colStats, colStat)
 
@@ -418,9 +451,18 @@ func createStatsDefaultColumns(
 			continue
 		}
 
+		// Non-index columns have very small histograms since it's not worth the
+		// overhead of storing large histograms for these columns. Since bool and
+		// enum types only have a few values anyway, include all possible values
+		// for those types, up to defaultHistogramBuckets.
+		maxHistBuckets := uint32(nonIndexColHistogramBuckets)
+		if col.Type.Family() == types.BoolFamily || col.Type.Family() == types.EnumFamily {
+			maxHistBuckets = defaultHistogramBuckets
+		}
 		colStats = append(colStats, jobspb.CreateStatsDetails_ColStat{
-			ColumnIDs:    colList,
-			HasHistogram: col.Type.Family() == types.BoolFamily || col.Type.Family() == types.EnumFamily,
+			ColumnIDs:           colList,
+			HasHistogram:        !colinfo.ColumnTypeIsInvertedIndexable(col.Type),
+			HistogramMaxBuckets: maxHistBuckets,
 		})
 		nonIdxCols++
 	}
@@ -463,9 +505,9 @@ var _ jobs.Resumer = &createStatsResumer{}
 
 // Resume is part of the jobs.Resumer interface.
 func (r *createStatsResumer) Resume(
-	ctx context.Context, phs interface{}, resultsCh chan<- tree.Datums,
+	ctx context.Context, execCtx interface{}, resultsCh chan<- tree.Datums,
 ) error {
-	p := phs.(*planner)
+	p := execCtx.(JobExecContext)
 	details := r.job.Details().(jobspb.CreateStatsDetails)
 	if details.Name == stats.AutoStatsName {
 		// We want to make sure there is only one automatic CREATE STATISTICS job
@@ -478,8 +520,8 @@ func (r *createStatsResumer) Resume(
 	r.tableID = details.Table.ID
 	evalCtx := p.ExtendedEvalContext()
 
-	ci := sqlbase.ColTypeInfoFromColTypes([]*types.T{})
-	rows := rowcontainer.NewRowContainer(evalCtx.Mon.MakeBoundAccount(), ci, 0)
+	ci := colinfo.ColTypeInfoFromColTypes([]*types.T{})
+	rows := rowcontainer.NewRowContainer(evalCtx.Mon.MakeBoundAccount(), ci)
 	defer func() {
 		if rows != nil {
 			rows.Close(ctx)
@@ -493,12 +535,12 @@ func (r *createStatsResumer) Resume(
 		evalCtx.Txn = txn
 
 		if details.AsOf != nil {
-			p.semaCtx.AsOfTimestamp = details.AsOf
-			p.extendedEvalCtx.SetTxnTimestamp(details.AsOf.GoTime())
+			p.SemaCtx().AsOfTimestamp = details.AsOf
+			p.ExtendedEvalContext().SetTxnTimestamp(details.AsOf.GoTime())
 			txn.SetFixedTimestamp(ctx, *details.AsOf)
 		}
 
-		planCtx := dsp.NewPlanningCtx(ctx, evalCtx, p, txn, true /* distribute */)
+		planCtx := dsp.NewPlanningCtx(ctx, evalCtx, nil /* planner */, txn, true /* distribute */)
 		if err := dsp.planAndRunCreateStats(
 			ctx, evalCtx, planCtx, txn, r.job, NewRowResultWriter(rows),
 		); err != nil {
@@ -566,7 +608,7 @@ func (r *createStatsResumer) Resume(
 // pending, running, or paused status that started earlier than this one. If
 // there are, checkRunningJobs returns an error. If job is nil, checkRunningJobs
 // just checks if there are any pending, running, or paused CreateStats jobs.
-func checkRunningJobs(ctx context.Context, job *jobs.Job, p *planner) error {
+func checkRunningJobs(ctx context.Context, job *jobs.Job, p JobExecContext) error {
 	var jobID int64
 	if job != nil {
 		jobID = *job.ID()

@@ -15,18 +15,18 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
 
 // ConvertToColumnOrdering converts an Ordering type (as defined in data.proto)
 // to a sqlbase.ColumnOrdering type.
-func ConvertToColumnOrdering(specOrdering Ordering) sqlbase.ColumnOrdering {
-	ordering := make(sqlbase.ColumnOrdering, len(specOrdering.Columns))
+func ConvertToColumnOrdering(specOrdering Ordering) colinfo.ColumnOrdering {
+	ordering := make(colinfo.ColumnOrdering, len(specOrdering.Columns))
 	for i, c := range specOrdering.Columns {
 		ordering[i].ColIdx = int(c.ColIdx)
 		if c.Direction == Ordering_Column_ASC {
@@ -40,7 +40,7 @@ func ConvertToColumnOrdering(specOrdering Ordering) sqlbase.ColumnOrdering {
 
 // ConvertToSpecOrdering converts a sqlbase.ColumnOrdering type
 // to an Ordering type (as defined in data.proto).
-func ConvertToSpecOrdering(columnOrdering sqlbase.ColumnOrdering) Ordering {
+func ConvertToSpecOrdering(columnOrdering colinfo.ColumnOrdering) Ordering {
 	return ConvertToMappedSpecOrdering(columnOrdering, nil)
 }
 
@@ -48,7 +48,7 @@ func ConvertToSpecOrdering(columnOrdering sqlbase.ColumnOrdering) Ordering {
 // to an Ordering type (as defined in data.proto), using the column
 // indices contained in planToStreamColMap.
 func ConvertToMappedSpecOrdering(
-	columnOrdering sqlbase.ColumnOrdering, planToStreamColMap []int,
+	columnOrdering colinfo.ColumnOrdering, planToStreamColMap []int,
 ) Ordering {
 	specOrdering := Ordering{}
 	specOrdering.Columns = make([]Ordering_Column, len(columnOrdering))
@@ -179,7 +179,7 @@ type ProducerMetadata struct {
 	// TODO(vivek): change to type Error
 	Err error
 	// TraceData is sent if snowball tracing is enabled.
-	TraceData []tracing.RecordedSpan
+	TraceData []tracingpb.RecordedSpan
 	// LeafTxnFinalState contains the final state of the LeafTxn to be
 	// sent from leaf flows to the RootTxn held by the flow's ultimate
 	// receiver.
@@ -196,6 +196,9 @@ type ProducerMetadata struct {
 	BulkProcessorProgress *RemoteProducerMetadata_BulkProcessorProgress
 	// Metrics contains information about goodput of the node.
 	Metrics *RemoteProducerMetadata_Metrics
+	// ContentionEvents are the contention events that occurred during query
+	// execution.
+	ContentionEvents []roachpb.ContentionEvent
 }
 
 var (
@@ -264,6 +267,8 @@ func RemoteProducerMetaToLocalMeta(
 		meta.Err = v.Error.ErrorDetail(ctx)
 	case *RemoteProducerMetadata_Metrics_:
 		meta.Metrics = v.Metrics
+	case *RemoteProducerMetadata_ContentionEvents_:
+		meta.ContentionEvents = v.ContentionEvents.ContentionEvents
 	default:
 		return *meta, false
 	}
@@ -307,6 +312,12 @@ func LocalMetaToRemoteProducerMeta(
 	} else if meta.Metrics != nil {
 		rpm.Value = &RemoteProducerMetadata_Metrics_{
 			Metrics: meta.Metrics,
+		}
+	} else if meta.ContentionEvents != nil {
+		rpm.Value = &RemoteProducerMetadata_ContentionEvents_{
+			ContentionEvents: &RemoteProducerMetadata_ContentionEvents{
+				ContentionEvents: meta.ContentionEvents,
+			},
 		}
 	} else {
 		rpm.Value = &RemoteProducerMetadata_Error{

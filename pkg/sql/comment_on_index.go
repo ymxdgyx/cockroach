@@ -16,26 +16,35 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 )
 
 type commentOnIndexNode struct {
 	n         *tree.CommentOnIndex
-	tableDesc *descpb.TableDescriptor
+	tableDesc *tabledesc.Mutable
 	indexDesc *descpb.IndexDescriptor
 }
 
 // CommentOnIndex adds a comment on an index.
 // Privileges: CREATE on table.
 func (p *planner) CommentOnIndex(ctx context.Context, n *tree.CommentOnIndex) (planNode, error) {
+	if err := checkSchemaChangeEnabled(
+		ctx,
+		&p.ExecCfg().Settings.SV,
+		"COMMENT ON INDEX",
+	); err != nil {
+		return nil, err
+	}
+
 	tableDesc, indexDesc, err := p.getTableAndIndex(ctx, &n.Index, privilege.CREATE)
 	if err != nil {
 		return nil, err
 	}
 
-	return &commentOnIndexNode{n: n, tableDesc: tableDesc.TableDesc(), indexDesc: indexDesc}, nil
+	return &commentOnIndexNode{n: n, tableDesc: tableDesc, indexDesc: indexDesc}, nil
 }
 
 func (n *commentOnIndexNode) startExec(params runParams) error {
@@ -71,7 +80,7 @@ func (n *commentOnIndexNode) startExec(params runParams) error {
 			n.tableDesc.Name,
 			string(n.n.Index.Index),
 			n.n.String(),
-			params.SessionData().User,
+			params.p.User().Normalized(),
 			n.n.Comment},
 	)
 }
@@ -83,7 +92,7 @@ func (p *planner) upsertIndexComment(
 		ctx,
 		"set-index-comment",
 		p.Txn(),
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		"UPSERT INTO system.comments VALUES ($1, $2, $3, $4)",
 		keys.IndexCommentType,
 		tableID,
@@ -100,7 +109,7 @@ func (p *planner) removeIndexComment(
 		ctx,
 		"delete-index-comment",
 		p.txn,
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		"DELETE FROM system.comments WHERE type=$1 AND object_id=$2 AND sub_id=$3",
 		keys.IndexCommentType,
 		tableID,

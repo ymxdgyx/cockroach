@@ -28,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -225,7 +226,7 @@ func (d Datums) IsDistinctFrom(evalCtx *EvalContext, other Datums) bool {
 
 // CompositeDatum is a Datum that may require composite encoding in
 // indexes. Any Datum implementing this interface must also add itself to
-// sqlbase/HasCompositeKeyEncoding.
+// colinfo.HasCompositeKeyEncoding.
 type CompositeDatum interface {
 	Datum
 	// IsComposite returns true if this datum is not round-tripable in a key
@@ -609,7 +610,7 @@ func (d *DBitArray) Format(ctx *FmtCtx) {
 	if f.HasFlags(fmtPgwireFormat) {
 		d.BitArray.Format(&ctx.Buffer)
 	} else {
-		withQuotes := !f.HasFlags(FmtFlags(lex.EncBareStrings))
+		withQuotes := !f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 		if withQuotes {
 			ctx.WriteString("B'")
 		}
@@ -684,6 +685,8 @@ func (d *DInt) Compare(ctx *EvalContext, other Datum) int {
 		v = *t
 	case *DFloat, *DDecimal:
 		return -t.Compare(ctx, d)
+	case *DOid:
+		v = t.DInt
 	default:
 		panic(makeUnsupportedComparisonMessage(d, other))
 	}
@@ -1063,14 +1066,18 @@ func (d *DDecimal) Format(ctx *FmtCtx) {
 	}
 }
 
+// shallowDecimalSize is the size of the fixed-size part of apd.Decimal in
+// bytes.
+const shallowDecimalSize = unsafe.Sizeof(apd.Decimal{})
+
 // SizeOfDecimal returns the size in bytes of an apd.Decimal.
-func SizeOfDecimal(d apd.Decimal) uintptr {
-	return uintptr(cap(d.Coeff.Bits())) * unsafe.Sizeof(big.Word(0))
+func SizeOfDecimal(d *apd.Decimal) uintptr {
+	return shallowDecimalSize + uintptr(cap(d.Coeff.Bits()))*unsafe.Sizeof(big.Word(0))
 }
 
 // Size implements the Datum interface.
 func (d *DDecimal) Size() uintptr {
-	return unsafe.Sizeof(*d) + SizeOfDecimal(d.Decimal)
+	return SizeOfDecimal(&d.Decimal)
 }
 
 var (
@@ -1283,7 +1290,7 @@ func (d *DCollatedString) Compare(ctx *EvalContext, other Datum) int {
 		return 1
 	}
 	v, ok := UnwrapDatum(ctx, other).(*DCollatedString)
-	if !ok || d.Locale != v.Locale {
+	if !ok || !d.ResolvedType().Equivalent(other.ResolvedType()) {
 		panic(makeUnsupportedComparisonMessage(d, other))
 	}
 	return bytes.Compare(d.Key, v.Key)
@@ -1432,7 +1439,7 @@ func (d *DBytes) Format(ctx *FmtCtx) {
 		writeAsHexString(ctx, d)
 		ctx.WriteString(`"`)
 	} else {
-		withQuotes := !f.HasFlags(FmtFlags(lex.EncBareStrings))
+		withQuotes := !f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 		if withQuotes {
 			if f.HasFlags(fmtFormatByteLiterals) {
 				ctx.WriteByte('b')
@@ -1532,7 +1539,7 @@ func (*DUuid) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DUuid) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -1694,7 +1701,7 @@ func (*DIPAddr) AmbiguousFormat() bool {
 // Format implements the NodeFormatter interface.
 func (d *DIPAddr) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -1875,7 +1882,7 @@ func (*DDate) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DDate) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -1991,7 +1998,7 @@ func (*DTime) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTime) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2116,7 +2123,7 @@ func (*DTimeTZ) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTimeTZ) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2160,10 +2167,12 @@ var dZeroTimestamp = &DTimestamp{}
 
 // time.Time formats.
 const (
-	// TimestampTZOutputFormat is used to output all TimestampTZs.
-	TimestampTZOutputFormat = "2006-01-02 15:04:05.999999-07:00"
-	// TimestampOutputFormat is used to output all Timestamps.
-	TimestampOutputFormat = "2006-01-02 15:04:05.999999"
+	// timestampTZOutputFormat is used to output all TimestampTZs.
+	// Note the second offset is missing here -- this is to maintain
+	// backward compatibility with casting timestamptz to strings.
+	timestampTZOutputFormat = "2006-01-02 15:04:05.999999-07:00"
+	// timestampOutputFormat is used to output all Timestamps.
+	timestampOutputFormat = "2006-01-02 15:04:05.999999"
 )
 
 // ParseDTimestamp parses and returns the *DTimestamp Datum value represented by
@@ -2346,11 +2355,11 @@ func (*DTimestamp) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTimestamp) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	ctx.WriteString(d.UTC().Format(TimestampOutputFormat))
+	ctx.WriteString(d.UTC().Format(timestampOutputFormat))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2503,11 +2512,22 @@ func (*DTimestampTZ) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTimestampTZ) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	ctx.WriteString(d.Time.Format(TimestampTZOutputFormat))
+	ctx.WriteString(d.Time.Format(timestampTZOutputFormat))
+	_, offsetSecs := d.Time.Zone()
+	// Only output remaining seconds offsets if it is available.
+	// This is to maintain backward compatibility with older CRDB versions,
+	// where we only output HH:MM.
+	if secondOffset := offsetSecs % 60; secondOffset != 0 {
+		if secondOffset < 0 {
+			secondOffset = 60 + secondOffset
+		}
+		ctx.WriteByte(':')
+		ctx.WriteString(fmt.Sprintf("%02d", secondOffset))
+	}
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2704,7 +2724,7 @@ func (*DInterval) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DInterval) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2721,11 +2741,11 @@ func (d *DInterval) Size() uintptr {
 
 // DGeography is the Geometry Datum.
 type DGeography struct {
-	*geo.Geography
+	geo.Geography
 }
 
 // NewDGeography returns a new Geography Datum.
-func NewDGeography(g *geo.Geography) *DGeography {
+func NewDGeography(g geo.Geography) *DGeography {
 	return &DGeography{Geography: g}
 }
 
@@ -2812,7 +2832,7 @@ func (*DGeography) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DGeography) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2824,16 +2844,16 @@ func (d *DGeography) Format(ctx *FmtCtx) {
 
 // Size implements the Datum interface.
 func (d *DGeography) Size() uintptr {
-	return unsafe.Sizeof(*d)
+	return d.Geography.SpatialObjectRef().MemSize()
 }
 
 // DGeometry is the Geometry Datum.
 type DGeometry struct {
-	*geo.Geometry
+	geo.Geometry
 }
 
 // NewDGeometry returns a new Geometry Datum.
-func NewDGeometry(g *geo.Geometry) *DGeometry {
+func NewDGeometry(g geo.Geometry) *DGeometry {
 	return &DGeometry{Geometry: g}
 }
 
@@ -2920,7 +2940,7 @@ func (*DGeometry) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DGeometry) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2932,16 +2952,16 @@ func (d *DGeometry) Format(ctx *FmtCtx) {
 
 // Size implements the Datum interface.
 func (d *DGeometry) Size() uintptr {
-	return unsafe.Sizeof(*d)
+	return d.Geometry.SpatialObjectRef().MemSize()
 }
 
 // DBox2D is the Datum representation of the Box2D type.
 type DBox2D struct {
-	*geo.CartesianBoundingBox
+	geo.CartesianBoundingBox
 }
 
 // NewDBox2D returns a new Box2D Datum.
-func NewDBox2D(b *geo.CartesianBoundingBox) *DBox2D {
+func NewDBox2D(b geo.CartesianBoundingBox) *DBox2D {
 	return &DBox2D{CartesianBoundingBox: b}
 }
 
@@ -2952,6 +2972,30 @@ func ParseDBox2D(str string) (*DBox2D, error) {
 		return nil, errors.Wrapf(err, "could not parse geometry")
 	}
 	return &DBox2D{CartesianBoundingBox: b}, nil
+}
+
+// AsDBox2D attempts to retrieve a *DBox2D from an Expr, returning a
+// *DBox2D and a flag signifying whether the assertion was successful. The
+// function should be used instead of direct type assertions wherever a
+// *DBox2D wrapped by a *DOidWrapper is possible.
+func AsDBox2D(e Expr) (*DBox2D, bool) {
+	switch t := e.(type) {
+	case *DBox2D:
+		return t, true
+	case *DOidWrapper:
+		return AsDBox2D(t.Wrapped)
+	}
+	return nil, false
+}
+
+// MustBeDBox2D attempts to retrieve a *DBox2D from an Expr, panicking
+// if the assertion fails.
+func MustBeDBox2D(e Expr) *DBox2D {
+	i, ok := AsDBox2D(e)
+	if !ok {
+		panic(errors.AssertionFailedf("expected *DBox2D, found %T", e))
+	}
+	return i
 }
 
 // ResolvedType implements the TypedExpr interface.
@@ -2966,7 +3010,7 @@ func (d *DBox2D) Compare(ctx *EvalContext, other Datum) int {
 		return 1
 	}
 	o := other.(*DBox2D)
-	return d.CartesianBoundingBox.Compare(o.CartesianBoundingBox)
+	return d.CartesianBoundingBox.Compare(&o.CartesianBoundingBox)
 }
 
 // Prev implements the Datum interface.
@@ -3005,7 +3049,7 @@ func (*DBox2D) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DBox2D) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -3017,7 +3061,7 @@ func (d *DBox2D) Format(ctx *FmtCtx) {
 
 // Size implements the Datum interface.
 func (d *DBox2D) Size() uintptr {
-	return unsafe.Sizeof(*d) + unsafe.Sizeof(*d.CartesianBoundingBox)
+	return unsafe.Sizeof(*d) + unsafe.Sizeof(d.CartesianBoundingBox)
 }
 
 // DJSON is the JSON Datum.
@@ -3272,6 +3316,16 @@ func AsDTuple(e Expr) (*DTuple, bool) {
 		return AsDTuple(t.Wrapped)
 	}
 	return nil, false
+}
+
+// MustBeDTuple attempts to retrieve a *DTuple from an Expr, panicking if the
+// assertion fails.
+func MustBeDTuple(e Expr) *DTuple {
+	i, ok := AsDTuple(e)
+	if !ok {
+		panic(errors.AssertionFailedf("expected *DTuple, found %T", e))
+	}
+	return i
 }
 
 // maybePopulateType populates the tuple's type if it hasn't yet been
@@ -4160,6 +4214,229 @@ func NewDOid(d DInt) *DOid {
 	return &oid
 }
 
+// ParseDOid parses and returns an Oid family datum.
+func ParseDOid(ctx *EvalContext, s string, t *types.T) (*DOid, error) {
+	// If it is an integer in string form, convert it as an int.
+	if val, err := ParseDInt(strings.TrimSpace(s)); err == nil {
+		tmpOid := NewDOid(*val)
+		oid, err := queryOid(ctx, t, tmpOid)
+		if err != nil {
+			oid = tmpOid
+			oid.semanticType = t
+		}
+		return oid, nil
+	}
+
+	switch t.Oid() {
+	case oid.T_regproc, oid.T_regprocedure:
+		// Trim procedure type parameters, e.g. `max(int)` becomes `max`.
+		// Postgres only does this when the cast is ::regprocedure, but we're
+		// going to always do it.
+		// We additionally do not yet implement disambiguation based on type
+		// parameters: we return the match iff there is exactly one.
+		s = pgSignatureRegexp.ReplaceAllString(s, "$1")
+
+		substrs, err := splitIdentifierList(s)
+		if err != nil {
+			return nil, err
+		}
+		if len(substrs) > 3 {
+			// A fully qualified function name in pg's dialect can contain
+			// at most 3 parts: db.schema.funname.
+			// For example mydb.pg_catalog.max().
+			// Anything longer is always invalid.
+			return nil, pgerror.Newf(pgcode.Syntax,
+				"invalid function name: %s", s)
+		}
+		name := UnresolvedName{NumParts: len(substrs)}
+		for i := 0; i < len(substrs); i++ {
+			name.Parts[i] = substrs[len(substrs)-1-i]
+		}
+		funcDef, err := name.ResolveFunction(ctx.SessionData.SearchPath)
+		if err != nil {
+			return nil, err
+		}
+		return queryOid(ctx, t, NewDString(funcDef.Name))
+	case oid.T_regtype:
+		parsedTyp, err := ctx.Planner.GetTypeFromValidSQLSyntax(s)
+		if err == nil {
+			return &DOid{
+				semanticType: t,
+				DInt:         DInt(parsedTyp.Oid()),
+				name:         parsedTyp.SQLStandardName(),
+			}, nil
+		}
+
+		// Fall back to searching pg_type, since we don't provide syntax for
+		// every postgres type that we understand OIDs for.
+		// Note this section does *not* work if there is a schema in front of the
+		// type, e.g. "pg_catalog"."int4" (if int4 was not defined).
+
+		// Trim whitespace and unwrap outer quotes if necessary.
+		// This is required to mimic postgres.
+		s = strings.TrimSpace(s)
+		if len(s) > 1 && s[0] == '"' && s[len(s)-1] == '"' {
+			s = s[1 : len(s)-1]
+		}
+		// Trim type modifiers, e.g. `numeric(10,3)` becomes `numeric`.
+		s = pgSignatureRegexp.ReplaceAllString(s, "$1")
+
+		dOid, missingTypeErr := queryOid(ctx, t, NewDString(s))
+		if missingTypeErr == nil {
+			return dOid, missingTypeErr
+		}
+		// Fall back to some special cases that we support for compatibility
+		// only. Client use syntax like 'sometype'::regtype to produce the oid
+		// for a type that they want to search a catalog table for. Since we
+		// don't support that type, we return an artificial OID that will never
+		// match anything.
+		switch s {
+		// We don't support triggers, but some tools search for them
+		// specifically.
+		case "trigger":
+		default:
+			return nil, missingTypeErr
+		}
+		return &DOid{
+			semanticType: t,
+			// Types we don't support get OID -1, so they won't match anything
+			// in catalogs.
+			DInt: -1,
+			name: s,
+		}, nil
+
+	case oid.T_regclass:
+		tn, err := castStringToRegClassTableName(s)
+		if err != nil {
+			return nil, err
+		}
+		id, err := ctx.Planner.ResolveTableName(ctx.Ctx(), &tn)
+		if err != nil {
+			return nil, err
+		}
+		return &DOid{
+			semanticType: t,
+			DInt:         DInt(id),
+			name:         tn.ObjectName.String(),
+		}, nil
+	default:
+		return queryOid(ctx, t, NewDString(s))
+	}
+}
+
+// castStringToRegClassTableName normalizes a TableName from a string.
+func castStringToRegClassTableName(s string) (TableName, error) {
+	components, err := splitIdentifierList(s)
+	if err != nil {
+		return TableName{}, err
+	}
+
+	if len(components) > 3 {
+		return TableName{}, pgerror.Newf(
+			pgcode.InvalidName,
+			"too many components: %s",
+			s,
+		)
+	}
+	var retComponents [3]string
+	for i := 0; i < len(components); i++ {
+		retComponents[len(components)-1-i] = components[i]
+	}
+	u, err := NewUnresolvedObjectName(
+		len(components),
+		retComponents,
+		0,
+	)
+	if err != nil {
+		return TableName{}, err
+	}
+	return u.ToTableName(), nil
+}
+
+// splitIdentifierList splits identifiers to individual components, lower
+// casing non-quoted identifiers and escaping quoted identifiers as appropriate.
+// It is based on PostgreSQL's SplitIdentifier.
+func splitIdentifierList(in string) ([]string, error) {
+	var pos int
+	var ret []string
+	const separator = '.'
+
+	for pos < len(in) {
+		if isWhitespace(in[pos]) {
+			pos++
+			continue
+		}
+		if in[pos] == '"' {
+			var b strings.Builder
+			// Attempt to find the ending quote. If the quote is double "",
+			// fold it into a " character for the str (e.g. "a""" means a").
+			for {
+				pos++
+				endIdx := strings.IndexByte(in[pos:], '"')
+				if endIdx == -1 {
+					return nil, pgerror.Newf(
+						pgcode.InvalidName,
+						`invalid name: unclosed ": %s`,
+						in,
+					)
+				}
+				b.WriteString(in[pos : pos+endIdx])
+				pos += endIdx + 1
+				// If we reached the end, or the following character is not ",
+				// we can break and assume this is one identifier.
+				// There are checks below to ensure EOF or whitespace comes
+				// afterward.
+				if pos == len(in) || in[pos] != '"' {
+					break
+				}
+				b.WriteByte('"')
+			}
+			ret = append(ret, b.String())
+		} else {
+			var b strings.Builder
+			for pos < len(in) && in[pos] != separator && !isWhitespace(in[pos]) {
+				b.WriteByte(in[pos])
+				pos++
+			}
+			// Anything with no quotations should be lowered.
+			ret = append(ret, strings.ToLower(b.String()))
+		}
+
+		// Further ignore all white space.
+		for pos < len(in) && isWhitespace(in[pos]) {
+			pos++
+		}
+
+		// At this stage, we expect separator or end of string.
+		if pos == len(in) {
+			break
+		}
+
+		if in[pos] != separator {
+			return nil, pgerror.Newf(
+				pgcode.InvalidName,
+				"invalid name: expected separator %c: %s",
+				separator,
+				in,
+			)
+		}
+
+		pos++
+	}
+
+	return ret, nil
+}
+
+// isWhitespace returns true if the given character is a space.
+// This must match parser.SkipWhitespace above.
+func isWhitespace(ch byte) bool {
+	switch ch {
+	case ' ', '\t', '\r', '\f', '\n':
+		return true
+	}
+	return false
+}
+
 // AsDOid attempts to retrieve a DOid from an Expr, returning a DOid and
 // a flag signifying whether the assertion was successful. The function should
 // be used instead of direct type assertions wherever a *DOid wrapped by a
@@ -4211,14 +4488,20 @@ func (d *DOid) Compare(ctx *EvalContext, other Datum) int {
 		// NULL is less than any non-NULL value.
 		return 1
 	}
-	v, ok := UnwrapDatum(ctx, other).(*DOid)
-	if !ok {
+	var v DInt
+	switch t := UnwrapDatum(ctx, other).(type) {
+	case *DOid:
+		v = t.DInt
+	case *DInt:
+		v = *t
+	default:
 		panic(makeUnsupportedComparisonMessage(d, other))
 	}
-	if d.DInt < v.DInt {
+
+	if d.DInt < v {
 		return -1
 	}
-	if d.DInt > v.DInt {
+	if d.DInt > v {
 		return 1
 	}
 	return 0
@@ -4239,12 +4522,12 @@ func (d *DOid) Format(ctx *FmtCtx) {
 		ctx.WriteByte('(')
 		d.DInt.Format(ctx)
 		ctx.WriteByte(',')
-		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lex.EncNoFlags)
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncNoFlags)
 		ctx.WriteByte(')')
 	} else {
 		// This is used to print the name of pseudo-procedures in e.g.
 		// pg_catalog.pg_type.typinput
-		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lex.EncBareStrings)
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncBareStrings)
 	}
 }
 
@@ -4568,6 +4851,21 @@ func NewDefaultDatum(evalCtx *EvalContext, t *types.T) (d Datum, err error) {
 		return NewDTuple(t, datums...), nil
 	case types.BitFamily:
 		return bitArrayZero, nil
+	case types.EnumFamily:
+		// The scenario in which this arises is when the column is being dropped and
+		// is NOT NULL. If there are no values for this enum, there's nothing that
+		// can be put here so we'll return
+		if len(t.TypeMeta.EnumData.PhysicalRepresentations) == 0 {
+			return nil, pgerror.Newf(
+				pgcode.NotNullViolation,
+				"%s has no values which can be used to satisfy the NOT NULL "+
+					"constraint while adding or dropping",
+				t.Name(),
+			)
+		}
+		// We fall back to using the smallest enum value during the dropping period.
+		return MakeDEnumFromPhysicalRepresentation(t,
+			t.TypeMeta.EnumData.PhysicalRepresentations[0])
 	default:
 		return nil, errors.AssertionFailedf("unhandled type %v", t.SQLString())
 	}
@@ -4627,7 +4925,7 @@ var baseDatumTypeSizes = map[types.Family]struct {
 }{
 	types.UnknownFamily:        {unsafe.Sizeof(dNull{}), fixedSize},
 	types.BoolFamily:           {unsafe.Sizeof(DBool(false)), fixedSize},
-	types.Box2DFamily:          {unsafe.Sizeof(DBox2D{CartesianBoundingBox: &geo.CartesianBoundingBox{}}), fixedSize},
+	types.Box2DFamily:          {unsafe.Sizeof(DBox2D{CartesianBoundingBox: geo.CartesianBoundingBox{}}), fixedSize},
 	types.BitFamily:            {unsafe.Sizeof(DBitArray{}), variableSize},
 	types.IntFamily:            {unsafe.Sizeof(DInt(0)), fixedSize},
 	types.FloatFamily:          {unsafe.Sizeof(DFloat(0.0)), fixedSize},

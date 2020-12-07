@@ -16,7 +16,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -567,6 +567,15 @@ func (expr *AnnotateTypeExpr) TypeCheck(
 func (expr *CollateExpr) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
+	if strings.ToLower(expr.Locale) == DefaultCollationTag {
+		return nil, errors.WithHint(
+			unimplemented.NewWithIssuef(
+				57255,
+				"DEFAULT collations are not supported",
+			),
+			`omit the 'COLLATE "default"' clause in your statement`,
+		)
+	}
 	_, err := language.Parse(expr.Locale)
 	if err != nil {
 		return nil, pgerror.Wrapf(err, pgcode.InvalidParameterValue,
@@ -785,7 +794,7 @@ func (sc *SemaContext) checkFunctionUsage(expr *FuncExpr, def *FunctionDefinitio
 	if def.UnsupportedWithIssue != 0 {
 		// Note: no need to embed the function name in the message; the
 		// caller will add the function name as prefix.
-		const msg = "this function is not supported"
+		const msg = "this function is not yet supported"
 		if def.UnsupportedWithIssue < 0 {
 			return unimplemented.New(def.Name+"()", msg)
 		}
@@ -837,6 +846,17 @@ func (sc *SemaContext) checkFunctionUsage(expr *FuncExpr, def *FunctionDefinitio
 	return nil
 }
 
+// NewContextDependentOpsNotAllowedError creates an error for the case when
+// context-dependent operators are not allowed in the given context.
+func NewContextDependentOpsNotAllowedError(context string) error {
+	// The code FeatureNotSupported is a bit misleading here,
+	// because we probably can't support the feature at all. However
+	// this error code matches PostgreSQL's in the same conditions.
+	return pgerror.Newf(pgcode.FeatureNotSupported,
+		"context-dependent operators are not allowed in %s", context,
+	)
+}
+
 // checkVolatility checks whether an operator with the given volatility is
 // allowed in the current context.
 func (sc *SemaContext) checkVolatility(v Volatility) error {
@@ -854,13 +874,7 @@ func (sc *SemaContext) checkVolatility(v Volatility) error {
 		}
 	case VolatilityStable:
 		if sc.Properties.required.rejectFlags&RejectStableOperators != 0 {
-			// The code FeatureNotSupported is a bit misleading here,
-			// because we probably can't support the feature at all. However
-			// this error code matches PostgreSQL's in the same conditions.
-			return pgerror.Newf(pgcode.FeatureNotSupported,
-				"context-dependent operators are not allowed in %s",
-				sc.Properties.required.context,
-			)
+			return NewContextDependentOpsNotAllowedError(sc.Properties.required.context)
 		}
 	}
 	return nil
@@ -1414,7 +1428,7 @@ func (expr *Tuple) TypeCheck(
 	if len(expr.Labels) > 0 {
 		labels = make([]string, len(expr.Labels))
 		for i := range expr.Labels {
-			labels[i] = lex.NormalizeName(expr.Labels[i])
+			labels[i] = lexbase.NormalizeName(expr.Labels[i])
 		}
 	}
 	expr.typ = types.MakeLabeledTuple(contents, labels)
@@ -1483,7 +1497,9 @@ func (expr *Placeholder) TypeCheck(
 	// when there are no available values for the placeholders yet, because
 	// during Execute all placeholders are replaced from the AST before type
 	// checking.
-	if typ, ok := semaCtx.Placeholders.Type(expr.Idx); ok {
+	if typ, ok, err := semaCtx.Placeholders.Type(expr.Idx); err != nil {
+		return expr, err
+	} else if ok {
 		if !desired.Equivalent(typ) {
 			// This indicates there's a conflict between what the type system thinks
 			// the type for this position should be, and the actual type of the
@@ -1732,6 +1748,7 @@ const (
 	compSignatureWithSubOpFmt = "<%s> %s %s <%s>"
 	compExprsFmt              = "%s %s %s: %v"
 	compExprsWithSubOpFmt     = "%s %s %s %s: %v"
+	invalidCompErrFmt         = "invalid comparison between different %s types: %s"
 	unsupportedCompErrFmt     = "unsupported comparison operator: %s"
 	unsupportedUnaryOpErrFmt  = "unsupported unary operator: %s"
 	unsupportedBinaryOpErrFmt = "unsupported binary operator: %s"
@@ -2019,6 +2036,13 @@ func typeCheckComparisonOp(
 	if len(fns) != 1 || typeMismatch {
 		sig := fmt.Sprintf(compSignatureFmt, leftReturn, op, rightReturn)
 		if len(fns) == 0 || typeMismatch {
+			// For some typeMismatch errors, we want to emit a more specific error
+			// message than "unknown comparison". In particular, comparison between
+			// two different enum types is invalid, rather than just unsupported.
+			if typeMismatch && leftFamily == types.EnumFamily && rightFamily == types.EnumFamily {
+				return nil, nil, nil, false,
+					pgerror.Newf(pgcode.InvalidParameterValue, invalidCompErrFmt, "enum", sig)
+			}
 			return nil, nil, nil, false,
 				pgerror.Newf(pgcode.InvalidParameterValue, unsupportedCompErrFmt, sig)
 		}

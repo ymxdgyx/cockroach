@@ -108,6 +108,10 @@ const (
 	// justification for this constant.
 	lookupJoinRetrieveRowCost = 2 * seqIOCostFactor
 
+	// virtualScanTableDescriptorFetchCost is the cost to retrieve the table
+	// descriptors when performing a virtual table scan.
+	virtualScanTableDescriptorFetchCost = 25 * randIOCostFactor
+
 	// Input rows to a join are processed in batches of this size.
 	// See joinreader.go.
 	joinReaderBatchSize = 100.0
@@ -133,6 +137,10 @@ const (
 	// If the final expression has this cost or larger, it means that there was no
 	// plan that could satisfy the hints.
 	hugeCost memo.Cost = 1e100
+
+	// preferLookupJoinFactor is a scale factor for the cost of a lookup join when
+	// we have a hint for preferring a lookup join.
+	preferLookupJoinFactor = 1e-6
 )
 
 // fnCost maps some functions to an execution cost. Currently this list
@@ -442,7 +450,7 @@ func (c *coster) ComputeCost(candidate memo.RelExpr, required *physical.Required
 		cost = c.computeMergeJoinCost(candidate.(*memo.MergeJoinExpr))
 
 	case opt.IndexJoinOp:
-		cost = c.computeIndexJoinCost(candidate.(*memo.IndexJoinExpr))
+		cost = c.computeIndexJoinCost(candidate.(*memo.IndexJoinExpr), required)
 
 	case opt.LookupJoinOp:
 		cost = c.computeLookupJoinCost(candidate.(*memo.LookupJoinExpr), required)
@@ -567,14 +575,26 @@ func (c *coster) computeScanCost(scan *memo.ScanExpr, required *physical.Require
 		}
 	}
 
+	numSpans := 1
+	if scan.Constraint != nil {
+		numSpans = scan.Constraint.Spans.Count()
+	} else if scan.InvertedConstraint != nil {
+		numSpans = len(scan.InvertedConstraint)
+	}
+	baseCost := memo.Cost(numSpans * randIOCostFactor)
+
+	// If this is a virtual scan, add the cost of fetching table descriptors.
+	if c.mem.Metadata().Table(scan.Table).IsVirtualTable() {
+		baseCost += virtualScanTableDescriptorFetchCost
+	}
+
 	// Add a small cost if the scan is unconstrained, so all else being equal, we
 	// will prefer a constrained scan. This is important if our row count
 	// estimate turns out to be smaller than the actual row count.
-	var preferConstrainedScanCost memo.Cost
 	if scan.IsUnfiltered(c.mem.Metadata()) {
-		preferConstrainedScanCost = cpuCostFactor
+		baseCost += cpuCostFactor
 	}
-	return memo.Cost(rowCount)*(seqIOCostFactor+perRowCost) + preferConstrainedScanCost
+	return baseCost + memo.Cost(rowCount)*(seqIOCostFactor+perRowCost)
 }
 
 func (c *coster) computeSelectCost(sel *memo.SelectExpr) memo.Cost {
@@ -609,11 +629,19 @@ func (c *coster) computeValuesCost(values *memo.ValuesExpr) memo.Cost {
 }
 
 func (c *coster) computeHashJoinCost(join memo.RelExpr) memo.Cost {
-	if !join.Private().(*memo.JoinPrivate).Flags.Has(memo.AllowHashJoinStoreRight) {
+	if join.Private().(*memo.JoinPrivate).Flags.Has(memo.DisallowHashJoinStoreRight) {
 		return hugeCost
 	}
 	leftRowCount := join.Child(0).(memo.RelExpr).Relational().Stats.RowCount
 	rightRowCount := join.Child(1).(memo.RelExpr).Relational().Stats.RowCount
+	if (join.Op() == opt.SemiJoinOp || join.Op() == opt.AntiJoinOp) && leftRowCount < rightRowCount {
+		// If we have a semi or an anti join, during the execbuilding we choose
+		// the relation with smaller cardinality to be on the right side, so we
+		// need to swap row counts accordingly.
+		// TODO(raduberinde): we might also need to look at memo.JoinFlags when
+		// choosing a side.
+		leftRowCount, rightRowCount = rightRowCount, leftRowCount
+	}
 
 	// A hash join must process every row from both tables once.
 	//
@@ -661,6 +689,9 @@ func (c *coster) computeHashJoinCost(join memo.RelExpr) memo.Cost {
 }
 
 func (c *coster) computeMergeJoinCost(join *memo.MergeJoinExpr) memo.Cost {
+	if join.MergeJoinPrivate.Flags.Has(memo.DisallowMergeJoin) {
+		return hugeCost
+	}
 	leftRowCount := join.Left.Relational().Stats.RowCount
 	rightRowCount := join.Right.Relational().Stats.RowCount
 
@@ -681,21 +712,51 @@ func (c *coster) computeMergeJoinCost(join *memo.MergeJoinExpr) memo.Cost {
 	return cost
 }
 
-func (c *coster) computeIndexJoinCost(join *memo.IndexJoinExpr) memo.Cost {
-	leftRowCount := join.Input.Relational().Stats.RowCount
-
-	// The rows in the (left) input are used to probe into the (right) table.
-	// Since the matching rows in the table may not all be in the same range, this
-	// counts as random I/O.
-	perRowCost := cpuCostFactor + randIOCostFactor +
-		c.rowScanCost(join.Table, cat.PrimaryIndex, join.Cols.Len())
-	return memo.Cost(leftRowCount) * perRowCost
+func (c *coster) computeIndexJoinCost(
+	join *memo.IndexJoinExpr, required *physical.Required,
+) memo.Cost {
+	return c.computeIndexLookupJoinCost(
+		join,
+		required,
+		true, /* lookupColsAreTableKey */
+		memo.TrueFilter,
+		join.Cols,
+		join.Table,
+		cat.PrimaryIndex,
+		memo.JoinFlags(0),
+	)
 }
 
 func (c *coster) computeLookupJoinCost(
 	join *memo.LookupJoinExpr, required *physical.Required,
 ) memo.Cost {
-	lookupCount := join.Input.Relational().Stats.RowCount
+	if join.LookupJoinPrivate.Flags.Has(memo.DisallowLookupJoinIntoRight) {
+		return hugeCost
+	}
+	return c.computeIndexLookupJoinCost(
+		join,
+		required,
+		join.LookupColsAreTableKey,
+		join.On,
+		join.Cols,
+		join.Table,
+		join.Index,
+		join.Flags,
+	)
+}
+
+func (c *coster) computeIndexLookupJoinCost(
+	join memo.RelExpr,
+	required *physical.Required,
+	lookupColsAreTableKey bool,
+	on memo.FiltersExpr,
+	cols opt.ColSet,
+	table opt.TableID,
+	index cat.IndexOrdinal,
+	flags memo.JoinFlags,
+) memo.Cost {
+	input := join.Child(0).(memo.RelExpr)
+	lookupCount := input.Relational().Stats.RowCount
 
 	// Take into account that the "internal" row count is higher, according to
 	// the selectivities of the conditions. In particular, we need to ignore
@@ -731,7 +792,7 @@ func (c *coster) computeLookupJoinCost(
 	// Since the matching rows in the table may not all be in the same range, this
 	// counts as random I/O.
 	perLookupCost := memo.Cost(randIOCostFactor)
-	if !join.LookupColsAreTableKey {
+	if !lookupColsAreTableKey {
 		// If the lookup columns don't form a key, execution will have to limit
 		// KV batches which prevents running requests to multiple nodes in parallel.
 		// An experiment on a 4 node cluster with a table with 100k rows split into
@@ -739,25 +800,38 @@ func (c *coster) computeLookupJoinCost(
 		// slower.
 		perLookupCost *= 5
 	}
+	if c.mem.Metadata().Table(table).IsVirtualTable() {
+		// It's expensive to perform a lookup join into a virtual table because
+		// we need to fetch the table descriptors on each lookup.
+		perLookupCost += virtualScanTableDescriptorFetchCost
+	}
 	cost := memo.Cost(lookupCount) * perLookupCost
 
-	filterSetup, filterPerRow := c.computeFiltersCost(join.On, util.FastIntMap{})
+	filterSetup, filterPerRow := c.computeFiltersCost(on, util.FastIntMap{})
 	cost += filterSetup
 
 	// Each lookup might retrieve many rows; add the IO cost of retrieving the
 	// rows (relevant when we expect many resulting rows per lookup) and the CPU
 	// cost of emitting the rows.
-	numLookupCols := join.Cols.Difference(join.Input.Relational().OutputCols).Len()
+	numLookupCols := cols.Difference(input.Relational().OutputCols).Len()
 	perRowCost := lookupJoinRetrieveRowCost + filterPerRow +
-		c.rowScanCost(join.Table, join.Index, numLookupCols)
+		c.rowScanCost(table, index, numLookupCols)
 
 	cost += memo.Cost(rowsProcessed) * perRowCost
+
+	if flags.Has(memo.PreferLookupJoinIntoRight) {
+		// If we prefer a lookup join, make the cost much smaller.
+		cost *= preferLookupJoinFactor
+	}
 	return cost
 }
 
 func (c *coster) computeInvertedJoinCost(
 	join *memo.InvertedJoinExpr, required *physical.Required,
 ) memo.Cost {
+	if join.InvertedJoinPrivate.Flags.Has(memo.DisallowInvertedJoinIntoRight) {
+		return hugeCost
+	}
 	lookupCount := join.Input.Relational().Stats.RowCount
 
 	// Take into account that the "internal" row count is higher, according to
@@ -1014,7 +1088,7 @@ func (c *coster) rowScanCost(tabID opt.TableID, idxOrd int, numScannedCols int) 
 	numCols := idx.ColumnCount()
 	// Remove any system columns from numCols.
 	for i := 0; i < idx.ColumnCount(); i++ {
-		if cat.IsSystemColumn(tab, idx.Column(i).Ordinal) {
+		if idx.Column(i).Kind() == cat.System {
 			numCols--
 		}
 	}

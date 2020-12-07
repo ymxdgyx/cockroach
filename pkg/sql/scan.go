@@ -15,13 +15,14 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
@@ -43,7 +44,7 @@ type scanNode struct {
 	// Enforce this using NoCopy.
 	_ util.NoCopy
 
-	desc  *sqlbase.ImmutableTableDescriptor
+	desc  *tabledesc.Immutable
 	index *descpb.IndexDescriptor
 
 	// Set if an index was explicitly specified.
@@ -60,10 +61,7 @@ type scanNode struct {
 	// the entire row.
 	cols []*descpb.ColumnDescriptor
 	// There is a 1-1 correspondence between cols and resultColumns.
-	resultColumns sqlbase.ResultColumns
-
-	// Map used to get the index for columns in cols.
-	colIdxMap map[descpb.ColumnID]int
+	resultColumns colinfo.ResultColumns
 
 	spans   []roachpb.Span
 	reverse bool
@@ -100,11 +98,9 @@ type scanNode struct {
 	lockingStrength   descpb.ScanLockingStrength
 	lockingWaitPolicy descpb.ScanLockingWaitPolicy
 
-	// systemColumns and systemColumnOrdinals contain information about what
-	// system columns the scan needs to produce, and what row ordinals to
-	// write those columns out into.
-	systemColumns        []descpb.SystemColumnKind
-	systemColumnOrdinals []int
+	// containsSystemColumns holds whether or not this scan is expected to
+	// produce any system columns.
+	containsSystemColumns bool
 }
 
 // scanColumnsConfig controls the "schema" of a scan node.
@@ -114,6 +110,10 @@ type scanColumnsConfig struct {
 	// can add more columns). Non public columns can only be added if allowed
 	// by the visibility flag below.
 	wantedColumns []tree.ColumnID
+	// wantedColumnsOrdinals contains the ordinals of all columns in
+	// wantedColumns. Note that if addUnwantedAsHidden flag is set, the hidden
+	// columns are not included here.
+	wantedColumnsOrdinals []uint32
 
 	// When set, the columns that are not in the wantedColumns list are added to
 	// the list of columns as hidden columns.
@@ -193,7 +193,7 @@ func (n *scanNode) limitHint() int64 {
 func (n *scanNode) initTable(
 	ctx context.Context,
 	p *planner,
-	desc *sqlbase.ImmutableTableDescriptor,
+	desc *tabledesc.Immutable,
 	indexFlags *tree.IndexFlags,
 	colCfg scanColumnsConfig,
 ) error {
@@ -212,7 +212,7 @@ func (n *scanNode) initTable(
 	}
 
 	// Check if any system columns are requested, as they need special handling.
-	n.systemColumns, n.systemColumnOrdinals = collectSystemColumnsFromCfg(&colCfg)
+	n.containsSystemColumns = scanContainsSystemColumns(&colCfg)
 
 	n.noIndexJoin = (indexFlags != nil && indexFlags.NoIndexJoin)
 	return n.initDescDefaults(colCfg)
@@ -256,7 +256,7 @@ func (n *scanNode) lookupSpecifiedIndex(indexFlags *tree.IndexFlags) error {
 
 // initColsForScan initializes cols according to desc and colCfg.
 func initColsForScan(
-	desc *sqlbase.ImmutableTableDescriptor, colCfg scanColumnsConfig,
+	desc *tabledesc.Immutable, colCfg scanColumnsConfig,
 ) (cols []*descpb.ColumnDescriptor, err error) {
 	if colCfg.wantedColumns == nil {
 		return nil, errors.AssertionFailedf("unexpectedly wantedColumns is nil")
@@ -266,10 +266,10 @@ func initColsForScan(
 	for _, wc := range colCfg.wantedColumns {
 		var c *descpb.ColumnDescriptor
 		var err error
-		if sqlbase.IsColIDSystemColumn(descpb.ColumnID(wc)) {
+		if colinfo.IsColIDSystemColumn(descpb.ColumnID(wc)) {
 			// If the requested column is a system column, then retrieve the
 			// corresponding descriptor.
-			c, err = sqlbase.GetSystemColumnDescriptorFromID(descpb.ColumnID(wc))
+			c, err = colinfo.GetSystemColumnDescriptorFromID(descpb.ColumnID(wc))
 			if err != nil {
 				return nil, err
 			}
@@ -324,10 +324,6 @@ func (n *scanNode) initDescDefaults(colCfg scanColumnsConfig) error {
 	}
 
 	// Set up the rest of the scanNode.
-	n.resultColumns = sqlbase.ResultColumnsFromColDescPtrs(n.desc.GetID(), n.cols)
-	n.colIdxMap = make(map[descpb.ColumnID]int, len(n.cols))
-	for i, c := range n.cols {
-		n.colIdxMap[c.ID] = i
-	}
+	n.resultColumns = colinfo.ResultColumnsFromColDescPtrs(n.desc.GetID(), n.cols)
 	return nil
 }

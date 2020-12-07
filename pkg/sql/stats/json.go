@@ -14,8 +14,8 @@ import (
 	fmt "fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -33,7 +33,7 @@ type JSONStatistic struct {
 	NullCount     uint64   `json:"null_count"`
 	// HistogramColumnType is the string representation of the column type for the
 	// histogram (or unset if there is no histogram). Parsable with
-	// tree.ParseType.
+	// tree.GetTypeFromValidSQLSyntax.
 	HistogramColumnType string            `json:"histo_col_type"`
 	HistogramBuckets    []JSONHistoBucket `json:"histo_buckets,omitempty"`
 }
@@ -56,14 +56,14 @@ func (js *JSONStatistic) SetHistogram(h *HistogramData) error {
 	typ := h.ColumnType
 	js.HistogramColumnType = typ.SQLString()
 	js.HistogramBuckets = make([]JSONHistoBucket, len(h.Buckets))
-	var a sqlbase.DatumAlloc
+	var a rowenc.DatumAlloc
 	for i := range h.Buckets {
 		b := &h.Buckets[i]
 		js.HistogramBuckets[i].NumEq = b.NumEq
 		js.HistogramBuckets[i].NumRange = b.NumRange
 		js.HistogramBuckets[i].DistinctRange = b.DistinctRange
 
-		datum, _, err := sqlbase.DecodeTableKey(&a, typ, b.UpperBound, encoding.Ascending)
+		datum, _, err := rowenc.DecodeTableKey(&a, typ, b.UpperBound, encoding.Ascending)
 		if err != nil {
 			return err
 		}
@@ -87,6 +87,10 @@ func (js *JSONStatistic) DecodeAndSetHistogram(datum tree.Datum) error {
 	if datum.ResolvedType().Family() != types.BytesFamily {
 		return fmt.Errorf("histogram datum type should be Bytes")
 	}
+	if len(*datum.(*tree.DBytes)) == 0 {
+		// This can happen if every value in the column is null.
+		return nil
+	}
 	h := &HistogramData{}
 	if err := protoutil.Unmarshal([]byte(*datum.(*tree.DBytes)), h); err != nil {
 		return err
@@ -102,7 +106,7 @@ func (js *JSONStatistic) GetHistogram(
 		return nil, nil
 	}
 	h := &HistogramData{}
-	colTypeRef, err := parser.ParseType(js.HistogramColumnType)
+	colTypeRef, err := parser.GetTypeFromValidSQLSyntax(js.HistogramColumnType)
 	if err != nil {
 		return nil, err
 	}
@@ -114,14 +118,14 @@ func (js *JSONStatistic) GetHistogram(
 	h.Buckets = make([]HistogramData_Bucket, len(js.HistogramBuckets))
 	for i := range h.Buckets {
 		hb := &js.HistogramBuckets[i]
-		upperVal, err := sqlbase.ParseDatumStringAs(colType, hb.UpperBound, evalCtx)
+		upperVal, err := rowenc.ParseDatumStringAs(colType, hb.UpperBound, evalCtx)
 		if err != nil {
 			return nil, err
 		}
 		h.Buckets[i].NumEq = hb.NumEq
 		h.Buckets[i].NumRange = hb.NumRange
 		h.Buckets[i].DistinctRange = hb.DistinctRange
-		h.Buckets[i].UpperBound, err = sqlbase.EncodeTableKey(nil, upperVal, encoding.Ascending)
+		h.Buckets[i].UpperBound, err = rowenc.EncodeTableKey(nil, upperVal, encoding.Ascending)
 		if err != nil {
 			return nil, err
 		}

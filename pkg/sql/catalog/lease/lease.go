@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -35,11 +36,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -49,6 +52,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 )
 
 var errRenewLease = errors.New("renew lease on id")
@@ -215,7 +219,9 @@ func (s storage) acquire(
 		if err != nil {
 			return err
 		}
-		if err := catalog.FilterDescriptorState(desc); err != nil {
+		if err := catalog.FilterDescriptorState(
+			desc, tree.CommonLookupFlags{}, // filter all non-public state
+		); err != nil {
 			return err
 		}
 		// Once the descriptor is set it is immutable and care must be taken
@@ -346,176 +352,6 @@ func (m *Manager) WaitForOneVersion(
 	return version, nil
 }
 
-// ErrDidntUpdateDescriptor can be returned from the update function passed to
-// PublishMultiple to suppress an error being returned and return the original
-// values.
-var ErrDidntUpdateDescriptor = errors.New("didn't update the descriptor")
-
-// PublishMultiple updates multiple descriptors, maintaining the invariant
-// that there are at most two versions of each descriptor out in the wild at any
-// time by first waiting for all nodes to be on the current (pre-update) version
-// of the descriptor.
-//
-// The update closure for all descriptors is called after the wait. The map argument
-// is a map of the descriptors with the IDs given in the ids slice, and the
-// closure mutates those descriptors. The txn argument closure is intended to be
-// used for updating jobs. Note that it can't be used for anything except
-// writing to system descriptors, since we set the system config trigger to write the
-// schema changes.
-//
-// The closure may be called multiple times if retries occur; make sure it does
-// not have side effects.
-//
-// Returns the updated versions of the descriptors.
-//
-// TODO (lucy): Providing the txn for the update closure just to update a job
-// is not ideal. There must be a better API for this.
-func (m *Manager) PublishMultiple(
-	ctx context.Context,
-	ids []descpb.ID,
-	update func(*kv.Txn, map[descpb.ID]catalog.MutableDescriptor) error,
-	logEvent func(*kv.Txn) error,
-) (map[descpb.ID]catalog.Descriptor, error) {
-	errLeaseVersionChanged := errors.New("lease version changed")
-	// Retry while getting errLeaseVersionChanged.
-	for r := retry.Start(base.DefaultRetryOptions()); r.Next(); {
-		// Wait until there are no unexpired leases on the previous versions
-		// of the descriptors.
-		expectedVersions := make(map[descpb.ID]descpb.DescriptorVersion)
-		for _, id := range ids {
-			expected, err := m.WaitForOneVersion(ctx, id, base.DefaultRetryOptions())
-			if err != nil {
-				return nil, err
-			}
-			expectedVersions[id] = expected
-		}
-
-		descs := make(map[descpb.ID]catalog.MutableDescriptor)
-		// There should be only one version of the descriptor, but it's
-		// a race now to update to the next version.
-		err := m.storage.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-			versions := make(map[descpb.ID]descpb.DescriptorVersion)
-			descsToUpdate := make(map[descpb.ID]catalog.MutableDescriptor)
-			for _, id := range ids {
-				// Re-read the current versions of the descriptor, this time
-				// transactionally.
-				desc, err := catalogkv.GetDescriptorByID(ctx, txn, m.storage.codec, id, catalogkv.Mutable,
-					catalogkv.AnyDescriptorKind, true /* required */)
-				// Due to details in #51417, it is possible for a user to request a
-				// descriptor which no longer exists. In that case, just return an error.
-				if err != nil {
-					return err
-				}
-				descsToUpdate[id] = desc.(catalog.MutableDescriptor)
-				if expectedVersions[id] != desc.GetVersion() {
-					// The version changed out from under us. Someone else must be
-					// performing a schema change operation.
-					if log.V(3) {
-						log.Infof(ctx, "publish %d (version changed): %d != %d", id, expectedVersions[id], desc.GetVersion())
-					}
-					return errLeaseVersionChanged
-				}
-
-				versions[id] = descsToUpdate[id].GetVersion()
-			}
-
-			// This is to write the updated descriptors if we're the system tenant.
-			if err := txn.SetSystemConfigTrigger(m.storage.codec.ForSystemTenant()); err != nil {
-				return err
-			}
-
-			// Run the update closure.
-			if err := update(txn, descsToUpdate); err != nil {
-				return err
-			}
-			for _, id := range ids {
-				if versions[id] != descsToUpdate[id].GetVersion() {
-					return errors.Errorf("updated version to: %d, expected: %d",
-						descsToUpdate[id].GetVersion(), versions[id])
-				}
-				descsToUpdate[id].MaybeIncrementVersion()
-				descs[id] = descsToUpdate[id]
-			}
-
-			b := txn.NewBatch()
-			for id, desc := range descs {
-				if err := catalogkv.WriteDescToBatch(ctx, false /* kvTrace */, m.storage.settings, b, m.storage.codec, id, desc); err != nil {
-					return err
-				}
-			}
-			if logEvent != nil {
-				// If an event log is required for this update, ensure that the
-				// descriptor change occurs first in the transaction. This is
-				// necessary to ensure that the System configuration change is
-				// gossiped. See the documentation for
-				// transaction.SetSystemConfigTrigger() for more information.
-				if err := txn.Run(ctx, b); err != nil {
-					return err
-				}
-				if err := logEvent(txn); err != nil {
-					return err
-				}
-				return txn.Commit(ctx)
-			}
-			// More efficient batching can be used if no event log message
-			// is required.
-			return txn.CommitInBatch(ctx, b)
-		})
-
-		switch {
-		case err == nil || errors.Is(err, ErrDidntUpdateDescriptor):
-			immutDescs := make(map[descpb.ID]catalog.Descriptor)
-			for id, desc := range descs {
-				immutDescs[id] = desc.Immutable()
-			}
-			return immutDescs, nil
-		case errors.Is(err, errLeaseVersionChanged):
-			// will loop around to retry
-		default:
-			return nil, err
-		}
-	}
-
-	panic("not reached")
-}
-
-// Publish updates a descriptor. It also maintains the invariant that
-// there are at most two versions of the descriptor out in the wild at any time
-// by first waiting for all nodes to be on the current (pre-update) version of
-// the descriptor.
-//
-// The update closure is called after the wait, and it provides the new version
-// of the descriptor to be written. In a multi-step schema operation, this
-// update should perform a single step.
-//
-// The closure may be called multiple times if retries occur; make sure it does
-// not have side effects.
-//
-// Returns the updated version of the descriptor.
-// TODO (lucy): Maybe have the closure take a *kv.Txn to match
-// PublishMultiple.
-func (m *Manager) Publish(
-	ctx context.Context,
-	id descpb.ID,
-	update func(catalog.MutableDescriptor) error,
-	logEvent func(*kv.Txn) error,
-) (catalog.Descriptor, error) {
-	ids := []descpb.ID{id}
-	updates := func(_ *kv.Txn, descs map[descpb.ID]catalog.MutableDescriptor) error {
-		desc, ok := descs[id]
-		if !ok {
-			return errors.AssertionFailedf("required descriptor with ID %d not provided to update closure", id)
-		}
-		return update(desc)
-	}
-
-	results, err := m.PublishMultiple(ctx, ids, updates, logEvent)
-	if err != nil {
-		return nil, err
-	}
-	return results[id], nil
-}
-
 // IDVersion represents a descriptor ID, version pair that are
 // meant to map to a single immutable descriptor.
 type IDVersion struct {
@@ -549,7 +385,7 @@ func CountLeases(
 		strings.Join(whereClauses, " OR ")
 	values, err := executor.QueryRowEx(
 		ctx, "count-leases", nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		stmt, at.GoTime(),
 	)
 	if err != nil {
@@ -580,7 +416,9 @@ func (s storage) getForExpiration(
 			return err
 		}
 		if prevTimestamp.LessEq(desc.GetModificationTime()) {
-			return errors.AssertionFailedf("unable to read descriptor (%d, %s)", id, expiration)
+			return errors.AssertionFailedf("unable to read descriptor"+
+				" (%d, %s) found descriptor with modificationTime %s",
+				id, expiration, desc.GetModificationTime())
 		}
 		// Create a descriptorVersionState with the descriptor and without a lease.
 		descVersionState = &descriptorVersionState{
@@ -693,14 +531,6 @@ func (l *descriptorSet) findVersion(version descpb.DescriptorVersion) *descripto
 }
 
 type descriptorState struct {
-	id      descpb.ID
-	stopper *stop.Stopper
-
-	// renewalInProgress is an atomic indicator for when a renewal for a
-	// lease has begun. This is atomic to prevent multiple routines from
-	// entering renewal initialization.
-	renewalInProgress int32
-
 	mu struct {
 		syncutil.Mutex
 
@@ -725,6 +555,14 @@ type descriptorState struct {
 		// ignored.
 		acquisitionsInProgress int
 	}
+
+	stopper *stop.Stopper
+	id      descpb.ID
+
+	// renewalInProgress is an atomic indicator for when a renewal for a
+	// lease has begun. This is atomic to prevent multiple routines from
+	// entering renewal initialization.
+	renewalInProgress int32
 }
 
 // ensureVersion ensures that the latest version >= minVersion. It will
@@ -1353,7 +1191,7 @@ func (c *nameCache) get(
 	defer desc.mu.Unlock()
 
 	if !NameMatchesDescriptor(desc, parentID, parentSchemaID, name) {
-		panic(errors.AssertionFailedf("Out of sync entry in the name cache. "+
+		panic(errors.AssertionFailedf("out of sync entry in the name cache. "+
 			"Cache entry: (%d, %d, %q) -> %d. Lease: (%d, %d, %q).",
 			parentID, parentSchemaID, name,
 			desc.GetID(),
@@ -1633,7 +1471,7 @@ func (m *Manager) AcquireByName(
 			if err := m.Release(desc); err != nil {
 				log.Warningf(ctx, "error releasing lease: %s", err)
 			}
-			return nil, hlc.Timestamp{}, sqlbase.ErrDescriptorNotFound
+			return nil, hlc.Timestamp{}, catalog.ErrDescriptorNotFound
 		}
 	}
 	return desc, expiration, nil
@@ -1641,7 +1479,7 @@ func (m *Manager) AcquireByName(
 
 // resolveName resolves a descriptor name to a descriptor ID at a particular
 // timestamp by looking in the database. If the mapping is not found,
-// sqlbase.ErrDescriptorNotFound is returned.
+// catalog.ErrDescriptorNotFound is returned.
 func (m *Manager) resolveName(
 	ctx context.Context,
 	timestamp hlc.Timestamp,
@@ -1674,7 +1512,7 @@ func (m *Manager) resolveName(
 		return id, err
 	}
 	if id == descpb.InvalidID {
-		return id, sqlbase.ErrDescriptorNotFound
+		return id, catalog.ErrDescriptorNotFound
 	}
 	return id, nil
 }
@@ -1779,7 +1617,7 @@ func (m *Manager) isDraining() bool {
 // to report work that needed to be done and which may or may not have
 // been done by the time this call returns. See the explanation in
 // pkg/server/drain.go for details.
-func (m *Manager) SetDraining(drain bool, reporter func(int, string)) {
+func (m *Manager) SetDraining(drain bool, reporter func(int, redact.SafeString)) {
 	m.draining.Store(drain)
 	if !drain {
 		return
@@ -1808,6 +1646,11 @@ func (m *Manager) findDescriptorState(id descpb.ID, create bool) *descriptorStat
 	t := m.mu.descriptors[id]
 	if t == nil && create {
 		t = &descriptorState{id: id, stopper: m.stopper}
+		if id >= 4294867200 {
+			stack := debug.Stack()
+			log.Warningf(context.TODO(), "adding questionable descriptor %d to lease manager: %v %s",
+				id, t, string(stack))
+		}
 		m.mu.descriptors[id] = t
 	}
 	return t
@@ -1816,7 +1659,7 @@ func (m *Manager) findDescriptorState(id descpb.ID, create bool) *descriptorStat
 // RefreshLeases starts a goroutine that refreshes the lease manager
 // leases for descriptors received in the latest system configuration via gossip or
 // rangefeeds. This function must be passed a non-nil gossip if
-// VersionRangefeedLeases is not active.
+// RangefeedLeases is not active.
 func (m *Manager) RefreshLeases(
 	ctx context.Context, s *stop.Stopper, db *kv.DB, g gossip.OptionalGossip,
 ) {
@@ -1847,8 +1690,8 @@ func (m *Manager) refreshLeases(
 					}
 				}
 
-				id, version, name, dropped, offline := sqlbase.GetDescriptorMetadata(desc)
-				goingOffline := offline || dropped
+				id, version, name, state := descpb.GetDescriptorMetadata(desc)
+				goingOffline := state == descpb.DescriptorState_DROP || state == descpb.DescriptorState_OFFLINE
 				// Try to refresh the lease to one >= this version.
 				log.VEventf(ctx, 2, "purging old version of descriptor %d@%d (offline %v)",
 					id, version, goingOffline)
@@ -1881,7 +1724,7 @@ func (m *Manager) watchForUpdates(
 	descUpdateCh chan *descpb.Descriptor,
 ) {
 	useRangefeeds := m.testingKnobs.AlwaysUseRangefeeds ||
-		m.storage.settings.Version.IsActive(ctx, clusterversion.VersionRangefeedLeases)
+		m.storage.settings.Version.IsActive(ctx, clusterversion.RangefeedLeases)
 	if useRangefeeds {
 		m.watchForRangefeedUpdates(ctx, s, db, descUpdateCh)
 		return
@@ -1924,17 +1767,17 @@ func (m *Manager) watchForGossipUpdates(
 ) {
 	rawG, err := g.OptionalErr(47150)
 	if err != nil {
-		if v := clusterversion.VersionRangefeedLeases; !m.storage.settings.Version.IsActive(ctx, v) {
-			log.Fatalf(ctx, "required gossip until %v is active: %v", clusterversion.VersionRangefeedLeases, err)
+		if v := clusterversion.RangefeedLeases; !m.storage.settings.Version.IsActive(ctx, v) {
+			log.Fatalf(ctx, "required gossip until %v is active: %v", clusterversion.RangefeedLeases, err)
 		}
 		return
 	}
 
 	s.RunWorker(ctx, func(ctx context.Context) {
-		descKeyPrefix := m.storage.codec.TablePrefix(uint32(sqlbase.DescriptorTable.ID))
+		descKeyPrefix := m.storage.codec.TablePrefix(uint32(systemschema.DescriptorTable.ID))
 		// TODO(ajwerner): Add a mechanism to unregister this channel upon
 		// return. NB: this call is allowed to bypass OptionalGossip because
-		// we'll never get here after VersionRangefeedLeases.
+		// we'll never get here after RangefeedLeases.
 		gossipUpdateC := rawG.RegisterSystemConfigChannel()
 		filter := gossip.MakeSystemConfigDeltaFilter(descKeyPrefix)
 
@@ -1973,7 +1816,7 @@ func (m *Manager) watchForRangefeedUpdates(
 			Closer:         s.ShouldQuiesce(),
 		}); r.Next(); i++ {
 			ts := m.getResolvedTimestamp()
-			descKeyPrefix := m.storage.codec.TablePrefix(uint32(sqlbase.DescriptorTable.ID))
+			descKeyPrefix := m.storage.codec.TablePrefix(uint32(systemschema.DescriptorTable.ID))
 			span := roachpb.Span{
 				Key:    descKeyPrefix,
 				EndKey: descKeyPrefix.PrefixEnd(),
@@ -2010,15 +1853,15 @@ func (m *Manager) watchForRangefeedUpdates(
 		}
 		var descriptor descpb.Descriptor
 		if err := ev.Value.GetProto(&descriptor); err != nil {
-			log.ReportOrPanic(ctx, &m.storage.settings.SV,
+			logcrash.ReportOrPanic(ctx, &m.storage.settings.SV,
 				"%s: unable to unmarshal descriptor %v", ev.Key, ev.Value)
 			return
 		}
 		if descriptor.Union == nil {
 			return
 		}
-		sqlbase.MaybeSetDescriptorModificationTimeFromMVCCTimestamp(ctx, &descriptor, ev.Value.Timestamp)
-		id, version, name, _, _ := sqlbase.GetDescriptorMetadata(&descriptor)
+		descpb.MaybeSetDescriptorModificationTimeFromMVCCTimestamp(ctx, &descriptor, ev.Value.Timestamp)
+		id, version, name, _ := descpb.GetDescriptorMetadata(&descriptor)
 		if log.V(2) {
 			log.Infof(ctx, "%s: refreshing lease on descriptor: %d (%s), version: %d",
 				ev.Key, id, name, version)
@@ -2076,8 +1919,8 @@ func (m *Manager) handleUpdatedSystemCfg(
 		if descriptor.Union == nil {
 			return
 		}
-		sqlbase.MaybeSetDescriptorModificationTimeFromMVCCTimestamp(ctx, &descriptor, kv.Value.Timestamp)
-		id, version, name, _, _ := sqlbase.GetDescriptorMetadata(&descriptor)
+		descpb.MaybeSetDescriptorModificationTimeFromMVCCTimestamp(ctx, &descriptor, kv.Value.Timestamp)
+		id, version, name, _ := descpb.GetDescriptorMetadata(&descriptor)
 		if log.V(2) {
 			log.Infof(ctx, "%s: refreshing lease on descriptor: %d (%s), version: %d",
 				kv.Key, id, name, version)
@@ -2118,7 +1961,7 @@ func (m *Manager) waitForRangefeedsToBeUsable(ctx context.Context, s *stop.Stopp
 			select {
 			case <-timer.C:
 				timer.Read = true
-				if m.storage.settings.Version.IsActive(ctx, clusterversion.VersionRangefeedLeases) {
+				if m.storage.settings.Version.IsActive(ctx, clusterversion.RangefeedLeases) {
 					close(upgradeChan)
 					return
 				}

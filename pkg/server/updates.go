@@ -34,10 +34,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/cloudinfo"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -80,7 +81,7 @@ type versionInfo struct {
 // phones home to check for updates and report usage.
 func (s *Server) PeriodicallyCheckForUpdates(ctx context.Context) {
 	s.stopper.RunWorker(ctx, func(ctx context.Context) {
-		defer log.RecoverAndReportNonfatalPanic(ctx, &s.st.SV)
+		defer logcrash.RecoverAndReportNonfatalPanic(ctx, &s.st.SV)
 		nextUpdateCheck := s.startTime
 		nextDiagnosticReport := s.startTime
 
@@ -120,7 +121,7 @@ func (s *Server) maybeCheckForUpdates(
 
 	// if diagnostics reporting is disabled, we should assume that means that the
 	// user doesn't want us phoning home for new-version checks either.
-	if !log.DiagnosticsReportingEnabled.Get(&s.st.SV) {
+	if !logcrash.DiagnosticsReportingEnabled.Get(&s.st.SV) {
 		return now.Add(updateCheckFrequency)
 	}
 
@@ -227,7 +228,7 @@ func (s *Server) checkForUpdates(ctx context.Context) bool {
 
 	err = decoder.Decode(&r)
 	if err != nil && err != io.EOF {
-		log.Warningf(ctx, "Error decoding updates info: %v", err)
+		log.Warningf(ctx, "error decoding updates info: %v", err)
 		return false
 	}
 
@@ -238,7 +239,7 @@ func (s *Server) checkForUpdates(ctx context.Context) bool {
 		r.Details = r.Details[len(r.Details)-updateMaxVersionsToReport:]
 	}
 	for _, v := range r.Details {
-		log.Infof(ctx, "A new version is available: %s, details: %s", v.Version, v.Details)
+		log.Infof(ctx, "a new version is available: %s, details: %s", v.Version, v.Details)
 	}
 	return true
 }
@@ -251,7 +252,7 @@ func (s *Server) maybeReportDiagnostics(ctx context.Context, now, scheduled time
 	// TODO(dt): we should allow tuning the reset and report intervals separately.
 	// Consider something like rand.Float() > resetFreq/reportFreq here to sample
 	// stat reset periods for reporting.
-	if log.DiagnosticsReportingEnabled.Get(&s.st.SV) {
+	if logcrash.DiagnosticsReportingEnabled.Get(&s.st.SV) {
 		s.ReportDiagnostics(ctx)
 	}
 
@@ -323,7 +324,7 @@ func (s *Server) getReportingInfo(
 	// flattened for quick reads, but we'd rather only report the non-defaults.
 	if datums, err := s.sqlServer.internalExecutor.QueryEx(
 		ctx, "read-setting", nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		"SELECT name FROM system.settings",
 	); err != nil {
 		log.Warningf(ctx, "failed to read settings: %s", err)
@@ -339,7 +340,7 @@ func (s *Server) getReportingInfo(
 		ctx,
 		"read-zone-configs",
 		nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		"SELECT id, config FROM system.zones",
 	); err != nil {
 		log.Warningf(ctx, "%v", err)
@@ -476,7 +477,7 @@ func (s *Server) collectSchemaInfo(ctx context.Context) ([]descpb.TableDescripto
 		if err := kv.ValueProto(&desc); err != nil {
 			return nil, errors.Wrapf(err, "%s: unable to unmarshal SQL descriptor", kv.Key)
 		}
-		if t := sqlbase.TableFromDescriptor(&desc, kv.Value.Timestamp); t != nil && t.ID > keys.MaxReservedDescID {
+		if t := descpb.TableFromDescriptor(&desc, kv.Value.Timestamp); t != nil && t.ID > keys.MaxReservedDescID {
 			if err := reflectwalk.Walk(t, redactor); err != nil {
 				panic(err) // stringRedactor never returns a non-nil err
 			}
@@ -490,7 +491,7 @@ type stringRedactor struct{}
 
 func (stringRedactor) Primitive(v reflect.Value) error {
 	if v.Kind() == reflect.String && v.String() != "" {
-		v.Set(reflect.ValueOf("_"))
+		v.Set(reflect.ValueOf("_").Convert(v.Type()))
 	}
 	return nil
 }

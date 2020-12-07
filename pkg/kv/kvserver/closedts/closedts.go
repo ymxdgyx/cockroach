@@ -64,6 +64,7 @@ type ReleaseFunc func(context.Context, ctpb.Epoch, roachpb.RangeID, ctpb.LAI)
 type TrackerI interface {
 	Close(next hlc.Timestamp, expCurEpoch ctpb.Epoch) (hlc.Timestamp, map[roachpb.RangeID]ctpb.LAI, bool)
 	Track(ctx context.Context) (hlc.Timestamp, ReleaseFunc)
+	FailedCloseAttempts() int64
 }
 
 // A Storage holds the closed timestamps and associated MLAIs for each node. It
@@ -128,7 +129,7 @@ type Producer interface {
 //    resulting entries to all of its subscribers.
 // 3. it accepts notifications from other nodes, passing these updates through
 //    to its local storage, so that
-// 4. the CanServe method determines via the the underlying storage whether a
+// 4. the CanServe method determines via the underlying storage whether a
 //    given read can be satisfied via follower reads.
 // 5. the MaxClosed method determines via the underlying storage what the maximum
 //    closed timestamp is for the specified LAI.

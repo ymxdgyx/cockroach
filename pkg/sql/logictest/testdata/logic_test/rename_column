@@ -47,7 +47,7 @@ id name  species
 
 user testuser
 
-statement error user testuser does not have CREATE privilege on relation users
+statement error pq: must be owner of table users or have CREATE privilege on table users
 ALTER TABLE users RENAME COLUMN name TO username
 
 user root
@@ -117,12 +117,13 @@ id
 username
 species
 
-query TTT
+query T
 EXPLAIN ALTER TABLE users RENAME COLUMN species TO woo
 ----
-·            distribution  local
-·            vectorized    false
-alter table  ·             ·
+distribution: local
+vectorized: false
+·
+• alter table
 
 # Verify that EXPLAIN did not actually rename the column
 query T

@@ -18,9 +18,13 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/errors"
@@ -28,8 +32,11 @@ import (
 )
 
 const (
-	defaultUserfileScheme      = "userfile"
-	defaultQualifiedNamePrefix = "defaultdb.public.userfiles_"
+	defaultUserfileScheme         = "userfile"
+	defaultQualifiedNamePrefix    = "defaultdb.public.userfiles_"
+	defaultQualifiedHexNamePrefix = "defaultdb.public.userfilesx_"
+	tmpSuffix                     = ".tmp"
+	fileTableNameSuffix           = "_upload_files"
 )
 
 var userFileUploadCmd = &cobra.Command{
@@ -43,15 +50,16 @@ Uploads a file to the user scoped file storage using a SQL connection.
 }
 
 var userFileListCmd = &cobra.Command{
-	Use:   "ls <file|dir glob>",
+	Use:   "list <file|dir glob>",
 	Short: "list files matching the provided pattern",
 	Long: `
 Lists the files stored in the user scoped file storage which match the provided pattern,
 using a SQL connection. If no pattern is provided, all files in the specified
 (or default, if unspecified) user scoped file storage will be listed.
 `,
-	Args: cobra.MinimumNArgs(0),
-	RunE: maybeShoutError(runUserFileList),
+	Args:    cobra.MinimumNArgs(0),
+	RunE:    maybeShoutError(runUserFileList),
+	Aliases: []string{"ls"},
 }
 
 var userFileDeleteCmd = &cobra.Command{
@@ -63,8 +71,9 @@ using a SQL connection. If passed pattern '*', all files in the specified
 (or default, if unspecified) user scoped file storage will be deleted. Deletions are not
 atomic, and all deletions prior to the first failure will occur. 
 `,
-	Args: cobra.MinimumNArgs(1),
-	RunE: maybeShoutError(runUserFileDelete),
+	Args:    cobra.MinimumNArgs(1),
+	RunE:    maybeShoutError(runUserFileDelete),
+	Aliases: []string{"rm"},
 }
 
 func runUserFileDelete(cmd *cobra.Command, args []string) error {
@@ -75,7 +84,18 @@ func runUserFileDelete(cmd *cobra.Command, args []string) error {
 	defer conn.Close()
 
 	glob := args[0]
-	return deleteUserFile(context.Background(), conn, glob)
+
+	var deletedFiles []string
+	if deletedFiles, err = deleteUserFile(context.Background(), conn, glob); err != nil {
+		return err
+	}
+
+	telemetry.Count("userfile.command.delete")
+	for _, file := range deletedFiles {
+		fmt.Printf("successfully deleted %s\n", file)
+	}
+
+	return nil
 }
 
 func runUserFileList(cmd *cobra.Command, args []string) error {
@@ -90,7 +110,17 @@ func runUserFileList(cmd *cobra.Command, args []string) error {
 		glob = args[0]
 	}
 
-	return listUserFile(context.Background(), conn, glob)
+	var files []string
+	if files, err = listUserFile(context.Background(), conn, glob); err != nil {
+		return err
+	}
+
+	telemetry.Count("userfile.command.list")
+	for _, file := range files {
+		fmt.Println(file)
+	}
+
+	return nil
 }
 
 func runUserFileUpload(cmd *cobra.Command, args []string) error {
@@ -113,7 +143,15 @@ func runUserFileUpload(cmd *cobra.Command, args []string) error {
 	}
 	defer reader.Close()
 
-	return uploadUserFile(context.Background(), conn, reader, source, destination)
+	var uploadedFile string
+	if uploadedFile, err = uploadUserFile(context.Background(), conn, reader, source,
+		destination); err != nil {
+		return err
+	}
+
+	telemetry.Count("userfile.command.upload")
+	fmt.Printf("successfully uploaded to %s\n", uploadedFile)
+	return nil
 }
 
 func openUserFile(source string) (io.ReadCloser, error) {
@@ -131,15 +169,32 @@ func openUserFile(source string) (io.ReadCloser, error) {
 	return f, nil
 }
 
+// getDefaultQualifiedTableName returns the default table name prefix for the
+// tables backing userfile.
+// To account for all supported usernames, we adopt a naming scheme whereby if
+// the normalized username remains unquoted after encoding to a SQL identifier,
+// we use it as is. Otherwise we use its hex representation.
+//
+// This schema gives us the two properties we desire from this table name prefix:
+// - Uniqueness amongst users with different usernames.
+// - Support for all current and future valid usernames.
+func getDefaultQualifiedTableName(user security.SQLUsername) string {
+	normalizedUsername := user.Normalized()
+	if lexbase.IsBareIdentifier(normalizedUsername) {
+		return defaultQualifiedNamePrefix + normalizedUsername
+	}
+	return defaultQualifiedHexNamePrefix + fmt.Sprintf("%x", normalizedUsername)
+}
+
 // Construct the userfile ExternalStorage URI from CLI args.
-func constructUserfileDestinationURI(source, destination, user string) string {
+func constructUserfileDestinationURI(source, destination string, user security.SQLUsername) string {
 	// User has not specified a destination URI/path. We use the default URI
 	// scheme and host, and the basename from the source arg as the path.
 	if destination == "" {
 		sourceFilename := path.Base(source)
 		userFileURL := url.URL{
 			Scheme: defaultUserfileScheme,
-			Host:   defaultQualifiedNamePrefix + user,
+			Host:   getDefaultQualifiedTableName(user),
 			Path:   sourceFilename,
 		}
 		return userFileURL.String()
@@ -148,10 +203,16 @@ func constructUserfileDestinationURI(source, destination, user string) string {
 	// If the destination is a well-formed userfile URI of the form
 	// userfile://db.schema.tablename_prefix/path/to/file, then we
 	// use that as the final URI.
+	//
+	// A URI without a host will default to searching in
+	// `defaultdb.public.userfiles_username`.
 	var userfileURI *url.URL
 	var err error
 	if userfileURI, err = url.ParseRequestURI(destination); err == nil {
-		if userfileURI.Scheme == defaultUserfileScheme && userfileURI.Host != "" {
+		if userfileURI.Scheme == defaultUserfileScheme {
+			if userfileURI.Host == "" {
+				userfileURI.Host = getDefaultQualifiedTableName(user)
+			}
 			return userfileURI.String()
 		}
 	}
@@ -160,19 +221,19 @@ func constructUserfileDestinationURI(source, destination, user string) string {
 	// userfile URI schema and host, and the destination as the path.
 	userFileURL := url.URL{
 		Scheme: defaultUserfileScheme,
-		Host:   defaultQualifiedNamePrefix + user,
+		Host:   getDefaultQualifiedTableName(user),
 		Path:   destination,
 	}
 	return userFileURL.String()
 }
 
-func constructUserfileListURI(glob, user string) string {
+func constructUserfileListURI(glob string, user security.SQLUsername) string {
 	// User has not specified a glob pattern and so we construct a URI which will
 	// list all the files stored in the UserFileTableStorage.
 	if glob == "" || glob == "*" {
 		userFileURL := url.URL{
 			Scheme: defaultUserfileScheme,
-			Host:   defaultQualifiedNamePrefix + user,
+			Host:   getDefaultQualifiedTableName(user),
 			Path:   "",
 		}
 		return userFileURL.String()
@@ -182,7 +243,7 @@ func constructUserfileListURI(glob, user string) string {
 	// userfile://db.schema.tablename_prefix/glob/pattern, then we
 	// use that as the final URI.
 	if userfileURL, err := url.ParseRequestURI(glob); err == nil {
-		if userfileURL.Scheme == defaultUserfileScheme && userfileURL.Host != "" {
+		if userfileURL.Scheme == defaultUserfileScheme {
 			return userfileURL.String()
 		}
 	}
@@ -191,91 +252,88 @@ func constructUserfileListURI(glob, user string) string {
 	// userfile URI schema and host, and the glob as the path.
 	userfileURL := url.URL{
 		Scheme: defaultUserfileScheme,
-		Host:   defaultQualifiedNamePrefix + user,
+		Host:   getDefaultQualifiedTableName(user),
 		Path:   glob,
 	}
 
 	return userfileURL.String()
 }
 
-func listUserFile(ctx context.Context, conn *sqlConn, glob string) error {
+func listUserFile(ctx context.Context, conn *sqlConn, glob string) ([]string, error) {
 	if err := conn.ensureConn(); err != nil {
-		return err
+		return nil, err
 	}
 
 	connURL, err := url.Parse(conn.url)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	userfileListURI := constructUserfileListURI(glob, connURL.User.Username())
+	reqUsername, _ := security.MakeSQLUsernameFromUserInput(connURL.User.Username(), security.UsernameValidation)
+
+	userfileListURI := constructUserfileListURI(glob, reqUsername)
 	unescapedUserfileListURI, err := url.PathUnescape(userfileListURI)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	userfileParsedURL, err := url.ParseRequestURI(unescapedUserfileListURI)
+	userFileTableConf, err := cloudimpl.ExternalStorageConfFromURI(unescapedUserfileListURI, reqUsername)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	userFileTableConf := roachpb.ExternalStorage_FileTable{
-		User:               connURL.User.Username(),
-		QualifiedTableName: userfileParsedURL.Host,
-		Path:               userfileParsedURL.Path,
-	}
-	f, err := cloudimpl.MakeSQLConnFileTableStorage(ctx, userFileTableConf,
+
+	f, err := cloudimpl.MakeSQLConnFileTableStorage(ctx, userFileTableConf.FileTableConfig,
 		conn.conn.(cloud.SQLConnI))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	files, err := f.ListFiles(ctx, "")
-	if err != nil {
-		return err
-	}
-
-	for _, file := range files {
-		fmt.Println(file)
-	}
-
-	return nil
+	return f.ListFiles(ctx, "")
 }
 
-func deleteUserFile(ctx context.Context, conn *sqlConn, glob string) error {
+func deleteUserFile(ctx context.Context, conn *sqlConn, glob string) ([]string, error) {
 	if err := conn.ensureConn(); err != nil {
-		return err
+		return nil, err
 	}
 
 	connURL, err := url.Parse(conn.url)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	userfileListURI := constructUserfileListURI(glob, connURL.User.Username())
+	reqUsername, _ := security.MakeSQLUsernameFromUserInput(connURL.User.Username(), security.UsernameValidation)
+
+	userfileListURI := constructUserfileListURI(glob, reqUsername)
 	unescapedUserfileListURI, err := url.PathUnescape(userfileListURI)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	userFileTableConf, err := cloudimpl.ExternalStorageConfFromURI(unescapedUserfileListURI, reqUsername)
+	if err != nil {
+		return nil, err
+	}
+
+	// We zero out the path so that we can provide explicit glob patterns to the
+	// ListFiles call below. Explicit glob patterns allows us to use the same
+	// ExternalStorage for both the ListFiles() and Delete() methods.
+	userFileTableConf.FileTableConfig.Path = ""
+	f, err := cloudimpl.MakeSQLConnFileTableStorage(ctx, userFileTableConf.FileTableConfig,
+		conn.conn.(cloud.SQLConnI))
+	if err != nil {
+		return nil, err
 	}
 
 	userfileParsedURL, err := url.ParseRequestURI(unescapedUserfileListURI)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	userFileTableConf := roachpb.ExternalStorage_FileTable{
-		User:               connURL.User.Username(),
-		QualifiedTableName: userfileParsedURL.Host,
-	}
-	f, err := cloudimpl.MakeSQLConnFileTableStorage(ctx, userFileTableConf,
-		conn.conn.(cloud.SQLConnI))
-	if err != nil {
-		return err
-	}
-
 	files, err := f.ListFiles(ctx, userfileParsedURL.Path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	var deletedFiles []string
 	for _, file := range files {
 		var deleteFileBasename string
 		if userfileParsedURL.Path == "" {
@@ -283,7 +341,7 @@ func deleteUserFile(ctx context.Context, conn *sqlConn, glob string) error {
 			// parsing.
 			parsedFile, err := url.ParseRequestURI(file)
 			if err != nil {
-				return errors.WithDetailf(err, "deletion failed at %s", file)
+				return deletedFiles, errors.WithDetailf(err, "deletion failed at %s", file)
 			}
 			deleteFileBasename = parsedFile.Path
 		} else {
@@ -293,16 +351,24 @@ func deleteUserFile(ctx context.Context, conn *sqlConn, glob string) error {
 		}
 		err = f.Delete(ctx, deleteFileBasename)
 		if err != nil {
-			return errors.WithDetail(err, fmt.Sprintf("deletion failed at %s", file))
+			return deletedFiles, errors.WithDetail(err, fmt.Sprintf("deletion failed at %s", file))
 		}
 
-		fmt.Printf("deleted userfile://%s%s\n", userfileParsedURL.Host, deleteFileBasename)
+		composedTableName := tree.Name(cloudimpl.DefaultQualifiedNamePrefix + connURL.User.Username())
+		resolvedHost := cloudimpl.DefaultQualifiedNamespace +
+			// Escape special identifiers as needed.
+			composedTableName.String()
+		if userfileParsedURL.Host != "" {
+			resolvedHost = userfileParsedURL.Host
+		}
+		deletedFiles = append(deletedFiles, fmt.Sprintf("userfile://%s%s", resolvedHost, deleteFileBasename))
 	}
-	return nil
+	return deletedFiles, nil
 }
 
-func uploadUserFile(
-	ctx context.Context, conn *sqlConn, reader io.Reader, source, destination string,
+func renameUserFile(
+	ctx context.Context, conn *sqlConn, oldFilename,
+	newFilename, qualifiedTableName string,
 ) error {
 	if err := conn.ensureConn(); err != nil {
 		return err
@@ -313,26 +379,86 @@ func uploadUserFile(
 		return err
 	}
 
-	connURL, err := url.Parse(conn.url)
+	stmt, err := conn.conn.Prepare(fmt.Sprintf(`UPDATE %s SET filename=$1 WHERE filename=$2`,
+		qualifiedTableName+fileTableNameSuffix))
 	if err != nil {
 		return err
 	}
 
+	defer func() {
+		if stmt != nil {
+			_ = stmt.Close()
+			_, _ = ex.ExecContext(ctx, `ROLLBACK`, nil)
+		}
+	}()
+
+	_, err = stmt.Exec([]driver.Value{newFilename, oldFilename})
+	if err != nil {
+		return err
+	}
+
+	if err := stmt.Close(); err != nil {
+		return err
+	}
+	stmt = nil
+
+	if _, err := ex.ExecContext(ctx, `COMMIT`, nil); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// uploadUserFile is responsible for uploading the local source file to the user
+// scoped storage referenced by destination.
+// This method returns the complete userfile URI representation to which the
+// file is uploaded to.
+func uploadUserFile(
+	ctx context.Context, conn *sqlConn, reader io.Reader, source, destination string,
+) (string, error) {
+	if err := conn.ensureConn(); err != nil {
+		return "", err
+	}
+
+	ex := conn.conn.(driver.ExecerContext)
+	if _, err := ex.ExecContext(ctx, `BEGIN`, nil); err != nil {
+		return "", err
+	}
+
+	connURL, err := url.Parse(conn.url)
+	if err != nil {
+		return "", err
+	}
+
+	// Validate the username for creation. We need to do this because
+	// there is no guarantee that the username in the connection string
+	// is the same one on the remote machine, and it may contain special
+	// characters.
+	// See also: https://github.com/cockroachdb/cockroach/issues/55389
+	username, err := security.MakeSQLUsernameFromUserInput(connURL.User.Username(), security.UsernameCreation)
+	if err != nil {
+		return "", err
+	}
 	// Construct the userfile URI as the destination for the CopyIn stmt.
 	// Currently we hardcode the db.schema prefix, in the future we might allow
 	// users to specify this.
-	userfileURI := constructUserfileDestinationURI(source, destination, connURL.User.Username())
+	userfileURI := constructUserfileDestinationURI(source, destination, username)
 
 	// Accounts for filenames with arbitrary unicode characters. url.URL escapes
 	// these characters by default when setting the Path above.
 	unescapedUserfileURL, err := url.PathUnescape(userfileURI)
+
+	// We append a tmp suffix to the filename being uploaded to indicate that the
+	// upload is still ongoing. This suffix is dropped once the copyTxn running
+	// the upload commits.
+	unescapedUserfileURL = unescapedUserfileURL + tmpSuffix
 	if err != nil {
-		return err
+		return "", err
 	}
 	stmt, err := conn.conn.Prepare(sql.CopyInFileStmt(unescapedUserfileURL, sql.CrdbInternalName,
 		sql.UserFileUploadTable))
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	defer func() {
@@ -350,25 +476,36 @@ func uploadUserFile(
 			// supports it.
 			_, err = stmt.Exec([]driver.Value{string(send[:n])})
 			if err != nil {
-				return err
+				return "", err
 			}
 		} else if err == io.EOF {
 			break
 		} else if err != nil {
-			return err
+			return "", err
 		}
 	}
 	if err := stmt.Close(); err != nil {
-		return err
+		return "", err
 	}
 	stmt = nil
 
 	if _, err := ex.ExecContext(ctx, `COMMIT`, nil); err != nil {
-		return err
+		return "", err
 	}
 
-	fmt.Printf("successfully uploaded to %s\n", unescapedUserfileURL)
-	return nil
+	// Drop the .tmp suffix from the filename uploaded to userfile, thereby
+	// indicating all chunks have been uploaded successfully.
+	tmpURL, err := url.Parse(unescapedUserfileURL)
+	if err != nil {
+		return "", err
+	}
+	err = renameUserFile(ctx, conn, tmpURL.Path, strings.TrimSuffix(tmpURL.Path, tmpSuffix),
+		tmpURL.Host)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSuffix(unescapedUserfileURL, tmpSuffix), nil
 }
 
 var userFileCmds = []*cobra.Command{

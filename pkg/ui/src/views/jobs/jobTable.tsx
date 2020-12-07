@@ -14,16 +14,19 @@ import {cockroach} from "src/js/protos";
 import {TimestampToMoment} from "src/util/convert";
 import {DATE_FORMAT} from "src/util/format";
 import {JobStatusCell} from "src/views/jobs/jobStatusCell";
-import {Icon, Pagination} from "antd";
 import {SortSetting} from "src/views/shared/components/sortabletable";
 import {CachedDataReducerState} from "src/redux/cachedDataReducer";
-import { isEmpty, isEqual, map } from "lodash";
+import { isEqual, map } from "lodash";
 import {JobDescriptionCell} from "src/views/jobs/jobDescriptionCell";
 import Job = cockroach.server.serverpb.JobsResponse.IJob;
 import JobsResponse = cockroach.server.serverpb.JobsResponse;
-import { paginationPageCount } from "src/components/pagination/pagination";
+import { Pagination, ResultsPerPageLabel } from "@cockroachlabs/admin-ui-components";
 import { jobTable } from "src/util/docs";
 import { trackDocsLink } from "src/util/analytics";
+import { EmptyTable } from "@cockroachlabs/admin-ui-components";
+import { Anchor } from "src/components";
+import emptyTableResultsIcon from "assets/emptyState/empty-table-results.svg";
+import magnifyingGlassIcon from "assets/emptyState/magnifying-glass.svg";
 
 class JobsSortedTable extends SortedTable<Job> {}
 
@@ -52,7 +55,7 @@ const jobsTableColumns: ColumnDescriptor<Job>[] = [
   },
   {
     title: "Status",
-    cell: job => <JobStatusCell job={job} />,
+    cell: job => <JobStatusCell job={job} compact />,
     sort: job => job.fraction_completed,
   },
 ];
@@ -94,27 +97,6 @@ export class JobTable extends React.Component<JobTableProps, JobTableState> {
     this.setState({ pagination: { ...pagination, current }});
   }
 
-  renderPage = (_page: number, type: "page" | "prev" | "next" | "jump-prev" | "jump-next", originalElement: React.ReactNode) => {
-    switch (type) {
-      case "jump-prev":
-        return (
-          <div className="_pg-jump">
-            <Icon type="left" />
-            <span className="_jump-dots">•••</span>
-          </div>
-        );
-      case "jump-next":
-        return (
-          <div className="_pg-jump">
-            <Icon type="right" />
-            <span className="_jump-dots">•••</span>
-          </div>
-        );
-      default:
-        return originalElement;
-    }
-  }
-
   renderCounts = () => {
     const { pagination: { current, pageSize } } = this.state;
     const total = this.props.jobs.data.jobs.length;
@@ -123,27 +105,66 @@ export class JobTable extends React.Component<JobTableProps, JobTableState> {
     return `${count} of ${total} jobs`;
   }
 
+  renderEmptyState = () => {
+    const { isUsedFilter, jobs } = this.props;
+    const hasData = jobs?.data?.jobs?.length > 0;
+
+    if (hasData) {
+      return null;
+    }
+
+    if (isUsedFilter) {
+      return (
+        <EmptyTable
+          title="No jobs match your search"
+          icon={magnifyingGlassIcon}
+          footer={
+            <Anchor
+              href={jobTable}
+              target="_blank"
+              onClick={this.redirectToLearnMore}
+            >
+              Learn more about jobs
+            </Anchor>
+          }
+        />
+      );
+    } else {
+      return (
+        <EmptyTable
+          title="No jobs to show"
+          icon={emptyTableResultsIcon}
+          message="The jobs page provides details about backup/restore jobs, schema changes, user-created table statistics, automatic table statistics jobs and changefeeds."
+          footer={
+            <Anchor
+              href={jobTable}
+              target="_blank"
+              onClick={this.redirectToLearnMore}
+            >
+              Learn more about jobs
+            </Anchor>
+          }
+        />
+      );
+    }
+  }
+
   redirectToLearnMore = (e: MouseEvent<HTMLAnchorElement>) => {
     trackDocsLink(e.currentTarget.text);
   }
 
-  noJobResult = () => (
-    <>
-      <h3 className="table__no-results--title">There are no jobs that match your search or filter.</h3>
-      <p className="table__no-results--description">
-        <a href={jobTable} target="_blank" onClick={this.redirectToLearnMore}>Learn more</a>
-      </p>
-    </>
-  )
-
   render() {
     const jobs = this.props.jobs.data.jobs;
     const { pagination } = this.state;
+
     return (
       <React.Fragment>
         <div className="cl-table-statistic">
           <h4 className="cl-count-title">
-            {paginationPageCount({ ...pagination, total: jobs.length }, "jobs")}
+            <ResultsPerPageLabel
+              pagination={{ ...pagination, total: jobs.length }}
+              pageName="jobs"
+            />
           </h4>
         </div>
         <JobsSortedTable
@@ -153,24 +174,14 @@ export class JobTable extends React.Component<JobTableProps, JobTableState> {
           className="jobs-table"
           rowClass={job => "jobs-table__row--" + job.status}
           columns={jobsTableColumns}
-          renderNoResult={this.noJobResult()}
-          empty={isEmpty(jobs) && !this.props.isUsedFilter}
-          emptyProps={{
-            title: "There are no jobs to display.",
-            description: "The jobs page provides details about backup/restore jobs, schema changes, user-created table statistics, automatic table statistics jobs and changefeeds.",
-            label: "Learn more",
-            buttonHref: jobTable,
-          }}
+          renderNoResult={this.renderEmptyState()}
           pagination={pagination}
         />
         <Pagination
-          size="small"
-          itemRender={this.renderPage as (page: number, type: "page" | "prev" | "next" | "jump-prev" | "jump-next") => React.ReactNode}
           pageSize={pagination.pageSize}
           current={pagination.current}
           total={jobs.length}
           onChange={this.onChangePage}
-          hideOnSinglePage
         />
       </React.Fragment>
     );

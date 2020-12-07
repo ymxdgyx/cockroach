@@ -64,6 +64,9 @@ type SupportedTarget struct {
 // SupportedTargets contains the supported targets that we build.
 var SupportedTargets = []SupportedTarget{
 	{BuildType: "linux-gnu", Suffix: ".linux-2.6.32-gnu-amd64"},
+	// TODO(#release): The architecture is at least 10.10 until v20.2 and 10.15 for v21.1 and after.
+	// However, this seems to be hardcoded all over the place (in particular, roachprod stage),
+	// so keeping the 10.9 standard for now.
 	{BuildType: "darwin", Suffix: ".darwin-10.9-amd64"},
 	{BuildType: "windows", Suffix: ".windows-6.2-amd64.exe"},
 }
@@ -421,6 +424,7 @@ func PutRelease(svc S3Putter, o PutReleaseOptions) {
 				log.Fatal(err)
 			}
 			zipHeader.Name = filepath.Join(targetArchiveBase, f.ArchiveFilePath)
+			zipHeader.Method = zip.Deflate
 
 			zfw, err := zw.CreateHeader(zipHeader)
 			if err != nil {
@@ -435,8 +439,8 @@ func PutRelease(svc S3Putter, o PutReleaseOptions) {
 		}
 	} else {
 		gzw := gzip.NewWriter(&body)
+		tw := tar.NewWriter(gzw)
 		for _, f := range o.Files {
-			tw := tar.NewWriter(gzw)
 
 			file, err := os.Open(f.LocalAbsolutePath)
 			if err != nil {
@@ -462,9 +466,9 @@ func PutRelease(svc S3Putter, o PutReleaseOptions) {
 			if _, err := io.Copy(tw, file); err != nil {
 				log.Fatal(err)
 			}
-			if err := tw.Close(); err != nil {
-				log.Fatal(err)
-			}
+		}
+		if err := tw.Close(); err != nil {
+			log.Fatal(err)
 		}
 		if err := gzw.Close(); err != nil {
 			log.Fatal(err)

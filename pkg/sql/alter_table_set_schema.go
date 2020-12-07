@@ -15,16 +15,16 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
 type alterTableSetSchemaNode struct {
 	newSchema string
-	tableDesc *sqlbase.MutableTableDescriptor
+	tableDesc *tabledesc.Mutable
 	n         *tree.AlterTableSetSchema
 }
 
@@ -33,6 +33,14 @@ type alterTableSetSchemaNode struct {
 func (p *planner) AlterTableSetSchema(
 	ctx context.Context, n *tree.AlterTableSetSchema,
 ) (planNode, error) {
+	if err := checkSchemaChangeEnabled(
+		ctx,
+		&p.ExecCfg().Settings.SV,
+		"ALTER TABLE/VIEW/SEQUENCE SET SCHEMA",
+	); err != nil {
+		return nil, err
+	}
+
 	tn := n.Name.ToTableName()
 	requiredTableKind := tree.ResolveAnyTableKind
 	if n.IsView {
@@ -48,6 +56,10 @@ func (p *planner) AlterTableSetSchema(
 	if tableDesc == nil {
 		// Noop.
 		return newZeroNode(nil /* columns */), nil
+	}
+
+	if err := checkViewMatchesMaterialized(tableDesc, n.IsView, n.IsMaterialized); err != nil {
+		return nil, err
 	}
 
 	if tableDesc.Temporary {
@@ -73,7 +85,7 @@ func (p *planner) AlterTableSetSchema(
 	}
 
 	return &alterTableSetSchemaNode{
-		newSchema: n.Schema,
+		newSchema: string(n.Schema),
 		tableDesc: tableDesc,
 		n:         n,
 	}, nil

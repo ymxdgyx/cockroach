@@ -27,8 +27,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
-	"go.etcd.io/etcd/raft"
-	"go.etcd.io/etcd/raft/tracker"
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/tracker"
 )
 
 const (
@@ -502,7 +502,10 @@ func (a *Allocator) allocateTargetFromList(
 	analyzedConstraints := constraint.AnalyzeConstraints(
 		ctx, a.storePool.getStoreDescriptor, candidateReplicas, zone)
 	candidates := allocateCandidates(
-		sl, analyzedConstraints, candidateReplicas, a.storePool.getLocalities(candidateReplicas),
+		ctx,
+		sl, analyzedConstraints, candidateReplicas,
+		a.storePool.getLocalitiesByStore(candidateReplicas),
+		a.storePool.isNodeReadyForRoutineReplicaTransfer,
 		options,
 	)
 	log.VEventf(ctx, 3, "allocate candidates: %s", candidates)
@@ -532,9 +535,9 @@ func (a Allocator) simulateRemoveTarget(
 	// but as of October 2017 calls to the Allocator are mostly serialized by the ReplicateQueue
 	// (with the main exceptions being Scatter and the status server's allocator debug endpoint).
 	// Try to make this interfere less with other callers.
-	a.storePool.updateLocalStoreAfterRebalance(targetStore, rangeUsageInfo, roachpb.ADD_REPLICA)
+	a.storePool.updateLocalStoreAfterRebalance(targetStore, rangeUsageInfo, roachpb.ADD_VOTER)
 	defer func() {
-		a.storePool.updateLocalStoreAfterRebalance(targetStore, rangeUsageInfo, roachpb.REMOVE_REPLICA)
+		a.storePool.updateLocalStoreAfterRebalance(targetStore, rangeUsageInfo, roachpb.REMOVE_VOTER)
 	}()
 	log.VEventf(ctx, 3, "simulating which replica would be removed after adding s%d", targetStore)
 	return a.RemoveTarget(ctx, zone, candidates, existingReplicas)
@@ -568,7 +571,7 @@ func (a Allocator) RemoveTarget(
 	rankedCandidates := removeCandidates(
 		sl,
 		analyzedConstraints,
-		a.storePool.getLocalities(existingReplicas),
+		a.storePool.getLocalitiesByStore(existingReplicas),
 		options,
 	)
 	log.VEventf(ctx, 3, "remove candidates: %s", rankedCandidates)
@@ -663,8 +666,8 @@ func (a Allocator) RebalanceTarget(
 		sl,
 		analyzedConstraints,
 		existingReplicas,
-		a.storePool.getLocalities(existingReplicas),
-		a.storePool.getNodeLocalityString,
+		a.storePool.getLocalitiesByStore(existingReplicas),
+		a.storePool.isNodeReadyForRoutineReplicaTransfer,
 		options,
 	)
 
@@ -766,6 +769,17 @@ func (a *Allocator) scorerOptions() scorerOptions {
 // TransferLeaseTarget returns a suitable replica to transfer the range lease
 // to from the provided list. It excludes the current lease holder replica
 // unless asked to do otherwise by the checkTransferLeaseSource parameter.
+//
+// Returns an empty descriptor if no target is found.
+//
+// TODO(aayush, andrei): If a draining leaseholder doesn't see any other voters
+// in its locality, but sees a learner, rather than allowing the lease to be
+// transferred outside of its current locality (likely violating leaseholder
+// preferences, at least temporarily), it would be nice to promote the existing
+// learner to a voter. This could be further extended to cases where we have a
+// dead voter in a given locality along with a live learner. In such cases, we
+// would want to promote the live learner to a voter and demote the dead voter
+// to a learner.
 func (a *Allocator) TransferLeaseTarget(
 	ctx context.Context,
 	zone *zonepb.ZoneConfig,
@@ -1005,7 +1019,7 @@ func (a Allocator) shouldTransferLeaseUsingStats(
 	if stats == nil || !enableLoadBasedLeaseRebalancing.Get(&a.storePool.st.SV) {
 		return decideWithoutStats, roachpb.ReplicaDescriptor{}
 	}
-	replicaLocalities := a.storePool.getLocalities(existing)
+	replicaLocalities := a.storePool.getLocalitiesByNode(existing)
 	for _, locality := range replicaLocalities {
 		if len(locality.Tiers) == 0 {
 			return decideWithoutStats, roachpb.ReplicaDescriptor{}

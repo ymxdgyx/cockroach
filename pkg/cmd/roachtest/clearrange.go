@@ -13,9 +13,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/version"
 )
 
 func registerClearRange(r *testRegistry) {
@@ -28,7 +30,7 @@ func registerClearRange(r *testRegistry) {
 			// to <3:30h but it varies.
 			Timeout:    5*time.Hour + 90*time.Minute,
 			MinVersion: "v19.1.0",
-			Cluster:    makeClusterSpec(10),
+			Cluster:    makeClusterSpec(10, cpu(16)),
 			Run: func(ctx context.Context, t *test, c *cluster) {
 				runClearRange(ctx, t, c, checks)
 			},
@@ -40,7 +42,14 @@ func runClearRange(ctx context.Context, t *test, c *cluster, aggressiveChecks bo
 	c.Put(ctx, cockroach, "./cockroach")
 
 	t.Status("restoring fixture")
-	c.Start(ctx, t)
+	// Randomize starting with encryption-at-rest enabled.
+	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
+	var opts []option
+	if rng.Intn(2) == 1 {
+		c.l.Printf("starting with encryption at rest enabled")
+		opts = append(opts, startArgs("--encrypt"))
+	}
+	c.Start(ctx, t, opts...)
 
 	// NB: on a 10 node cluster, this should take well below 3h.
 	tBegin := timeutil.Now()
@@ -55,18 +64,25 @@ func runClearRange(ctx context.Context, t *test, c *cluster, aggressiveChecks bo
 		// This slows down merges, so it might hide some races.
 		//
 		// NB: the below invocation was found to actually make it to the server at the time of writing.
-		c.Start(ctx, t, startArgs(
+		opts = append(opts, startArgs(
 			"--env", "COCKROACH_CONSISTENCY_AGGRESSIVE=true COCKROACH_ENFORCE_CONSISTENT_STATS=true",
 		))
-	} else {
-		c.Start(ctx, t)
 	}
+	c.Start(ctx, t, opts...)
 
 	// Also restore a much smaller table. We'll use it to run queries against
 	// the cluster after having dropped the large table above, verifying that
 	// the  cluster still works.
 	t.Status(`restoring tiny table`)
 	defer t.WorkerStatus()
+
+	if t.buildVersion.AtLeast(version.MustParse("v19.2.0")) {
+		conn := c.Conn(ctx, 1)
+		if _, err := conn.ExecContext(ctx, `SET CLUSTER SETTING kv.bulk_io_write.concurrent_addsstable_requests = $1`, c.spec.NodeCount); err != nil {
+			t.Fatal(err)
+		}
+		conn.Close()
+	}
 
 	// Use a 120s connect timeout to work around the fact that the server will
 	// declare itself ready before it's actually 100% ready. See:
@@ -157,6 +173,7 @@ func runClearRange(ctx context.Context, t *test, c *cluster, aggressiveChecks bo
 				return err
 			}
 
+			t.WorkerStatus("waiting for ~", curBankRanges, " merges to complete (and for at least ", timeutil.Now().Sub(deadline), " to pass)")
 			select {
 			case <-after:
 			case <-ctx.Done():

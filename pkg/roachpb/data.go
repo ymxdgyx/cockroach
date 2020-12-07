@@ -43,7 +43,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-	"go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 var (
@@ -88,7 +88,7 @@ func (rk RKey) AsRawKey() Key {
 
 // Less returns true if receiver < otherRK.
 func (rk RKey) Less(otherRK RKey) bool {
-	return bytes.Compare(rk, otherRK) < 0
+	return rk.Compare(otherRK) < 0
 }
 
 // Compare compares the two RKeys.
@@ -434,7 +434,7 @@ func (v *Value) SetGeo(so geopb.SpatialObject) error {
 
 // SetBox2D encodes the specified Box2D value into the bytes field of the
 // receiver, sets the tag and clears the checksum.
-func (v *Value) SetBox2D(b *geo.CartesianBoundingBox) {
+func (v *Value) SetBox2D(b geo.CartesianBoundingBox) {
 	v.ensureRawBytes(headerSize + 32)
 	encoding.EncodeUint64Ascending(v.RawBytes[headerSize:headerSize], math.Float64bits(b.LoX))
 	encoding.EncodeUint64Ascending(v.RawBytes[headerSize+8:headerSize+8], math.Float64bits(b.HiX))
@@ -519,7 +519,7 @@ func (v *Value) SetDuration(t duration.Duration) error {
 // receiver, sets the tag and clears the checksum.
 func (v *Value) SetBitArray(t bitarray.BitArray) {
 	words, _ := t.EncodingParts()
-	v.ensureRawBytes(headerSize + encoding.NonsortingUvarintMaxLen + 8*len(words))
+	v.ensureRawBytes(headerSize + encoding.MaxNonsortingUvarintLen + 8*len(words))
 	v.RawBytes = encoding.EncodeUntaggedBitArrayValue(v.RawBytes[:headerSize], t)
 	v.setTag(ValueType_BITARRAY)
 }
@@ -582,35 +582,35 @@ func (v Value) GetGeo() (geopb.SpatialObject, error) {
 
 // GetBox2D decodes a geo value from the bytes field of the receiver. If the
 // tag is not BOX2D an error will be returned.
-func (v Value) GetBox2D() (*geo.CartesianBoundingBox, error) {
+func (v Value) GetBox2D() (geo.CartesianBoundingBox, error) {
+	box := geo.CartesianBoundingBox{}
 	if tag := v.GetTag(); tag != ValueType_BOX2D {
-		return nil, fmt.Errorf("value type is not %s: %s", ValueType_BOX2D, tag)
+		return box, fmt.Errorf("value type is not %s: %s", ValueType_BOX2D, tag)
 	}
-	box := &geo.CartesianBoundingBox{}
 	dataBytes := v.dataBytes()
 	if len(dataBytes) != 32 {
-		return nil, fmt.Errorf("float64 value should be exactly 32 bytes: %d", len(dataBytes))
+		return box, fmt.Errorf("float64 value should be exactly 32 bytes: %d", len(dataBytes))
 	}
 	var err error
 	var val uint64
 	dataBytes, val, err = encoding.DecodeUint64Ascending(dataBytes)
 	if err != nil {
-		return nil, err
+		return box, err
 	}
 	box.LoX = math.Float64frombits(val)
 	dataBytes, val, err = encoding.DecodeUint64Ascending(dataBytes)
 	if err != nil {
-		return nil, err
+		return box, err
 	}
 	box.HiX = math.Float64frombits(val)
 	dataBytes, val, err = encoding.DecodeUint64Ascending(dataBytes)
 	if err != nil {
-		return nil, err
+		return box, err
 	}
 	box.LoY = math.Float64frombits(val)
 	_, val, err = encoding.DecodeUint64Ascending(dataBytes)
 	if err != nil {
-		return nil, err
+		return box, err
 	}
 	box.HiY = math.Float64frombits(val)
 
@@ -868,12 +868,6 @@ func (ts TransactionStatus) IsFinalized() bool {
 	return ts == COMMITTED || ts == ABORTED
 }
 
-// IsCommittedOrStaging determines if the transaction is morally committed (i.e.
-// in the COMMITTED or STAGING state).
-func (ts TransactionStatus) IsCommittedOrStaging() bool {
-	return ts == COMMITTED || ts == STAGING
-}
-
 var _ errors.SafeMessager = Transaction{}
 
 // MakeTransaction creates a new transaction. The transaction key is
@@ -924,7 +918,7 @@ func (t Transaction) Clone() *Transaction {
 
 // AssertInitialized crashes if the transaction is not initialized.
 func (t *Transaction) AssertInitialized(ctx context.Context) {
-	if t.ID == (uuid.UUID{}) || t.WriteTimestamp == (hlc.Timestamp{}) {
+	if t.ID == (uuid.UUID{}) || t.WriteTimestamp.IsEmpty() {
 		log.Fatalf(ctx, "uninitialized txn: %s", *t)
 	}
 }
@@ -1048,6 +1042,15 @@ func (t *Transaction) BumpEpoch() {
 	t.Epoch++
 }
 
+// Refresh reconfigures a transaction to account for a read refresh up to the
+// specified timestamp. For details about transaction read refreshes, see the
+// comment on txnSpanRefresher.
+func (t *Transaction) Refresh(timestamp hlc.Timestamp) {
+	t.WriteTimestamp.Forward(timestamp)
+	t.ReadTimestamp.Forward(t.WriteTimestamp)
+	t.WriteTooOld = false
+}
+
 // Update ratchets priority, timestamp and original timestamp values (among
 // others) for the transaction. If t.ID is empty, then the transaction is
 // copied from o.
@@ -1095,7 +1098,7 @@ func (t *Transaction) Update(o *Transaction) {
 			// Nothing to do.
 		}
 
-		if t.ReadTimestamp.Equal(o.ReadTimestamp) {
+		if t.ReadTimestamp == o.ReadTimestamp {
 			// If neither of the transactions has a bumped ReadTimestamp, then the
 			// WriteTooOld flag is cumulative.
 			t.WriteTooOld = t.WriteTooOld || o.WriteTooOld
@@ -1147,9 +1150,9 @@ func (t *Transaction) Update(o *Transaction) {
 	// On update, set lower bound timestamps to the minimum seen by either txn.
 	// These shouldn't differ unless one of them is empty, but we're careful
 	// anyway.
-	if t.MinTimestamp == (hlc.Timestamp{}) {
+	if t.MinTimestamp.IsEmpty() {
 		t.MinTimestamp = o.MinTimestamp
-	} else if o.MinTimestamp != (hlc.Timestamp{}) {
+	} else if !o.MinTimestamp.IsEmpty() {
 		t.MinTimestamp.Backward(o.MinTimestamp)
 	}
 
@@ -1176,6 +1179,15 @@ func (t *Transaction) UpgradePriority(minPriority enginepb.TxnPriority) {
 // This method will never return false for a writing transaction.
 func (t *Transaction) IsLocking() bool {
 	return t.Key != nil
+}
+
+// LocksAsLockUpdates turns t.LockSpans into a bunch of LockUpdates.
+func (t *Transaction) LocksAsLockUpdates() []LockUpdate {
+	ret := make([]LockUpdate, len(t.LockSpans))
+	for i, sp := range t.LockSpans {
+		ret[i] = MakeLockUpdate(t, sp)
+	}
+	return ret
 }
 
 // String formats transaction into human readable string.
@@ -1337,8 +1349,8 @@ func (tr *TransactionRecord) AsTransaction() Transaction {
 // already-existing Transaction with an incremented epoch, or a completely new
 // Transaction.
 //
-// The caller should generally check that the error was
-// meant for this Transaction before calling this.
+// The caller should generally check that the error was meant for this
+// Transaction before calling this.
 //
 // pri is the priority that should be used when giving the restarted transaction
 // the chance to get a higher priority. Not used when the transaction is being
@@ -1349,7 +1361,7 @@ func (tr *TransactionRecord) AsTransaction() Transaction {
 func PrepareTransactionForRetry(
 	ctx context.Context, pErr *Error, pri UserPriority, clock *hlc.Clock,
 ) Transaction {
-	if pErr.TransactionRestart == TransactionRestart_NONE {
+	if pErr.TransactionRestart() == TransactionRestart_NONE {
 		log.Fatalf(ctx, "invalid retryable err (%T): %s", pErr.GetDetail(), pErr)
 	}
 
@@ -1396,7 +1408,7 @@ func PrepareTransactionForRetry(
 		// the restart.
 	case *WriteTooOldError:
 		// Increase the timestamp to the ts at which we've actually written.
-		txn.WriteTimestamp.Forward(writeTooOldRetryTimestamp(&txn, tErr))
+		txn.WriteTimestamp.Forward(writeTooOldRetryTimestamp(tErr))
 	default:
 		log.Fatalf(ctx, "invalid retryable err (%T): %s", pErr.GetDetail(), pErr)
 	}
@@ -1409,16 +1421,26 @@ func PrepareTransactionForRetry(
 	return txn
 }
 
-// CanTransactionRetryAtRefreshedTimestamp returns whether the transaction
-// specified in the supplied error can be retried at a refreshed timestamp to
-// avoid a client-side transaction restart. If true, returns a cloned, updated
-// Transaction object with the provisional commit timestamp and refreshed
-// timestamp set appropriately.
-func CanTransactionRetryAtRefreshedTimestamp(
-	ctx context.Context, pErr *Error,
-) (bool, *Transaction) {
+// PrepareTransactionForRefresh returns whether the transaction can be refreshed
+// to the specified timestamp to avoid a client-side transaction restart. If
+// true, returns a cloned, updated Transaction object with the provisional
+// commit timestamp and read timestamp set appropriately.
+func PrepareTransactionForRefresh(txn *Transaction, timestamp hlc.Timestamp) (bool, *Transaction) {
+	if txn.CommitTimestampFixed {
+		return false, nil
+	}
+	newTxn := txn.Clone()
+	newTxn.Refresh(timestamp)
+	return true, newTxn
+}
+
+// CanTransactionRefresh returns whether the transaction specified in the
+// supplied error can be retried at a refreshed timestamp to avoid a client-side
+// transaction restart. If true, returns a cloned, updated Transaction object
+// with the provisional commit timestamp and read timestamp set appropriately.
+func CanTransactionRefresh(ctx context.Context, pErr *Error) (bool, *Transaction) {
 	txn := pErr.GetTxn()
-	if txn == nil || txn.CommitTimestampFixed {
+	if txn == nil {
 		return false, nil
 	}
 	timestamp := txn.WriteTimestamp
@@ -1433,20 +1455,14 @@ func CanTransactionRetryAtRefreshedTimestamp(
 		// error, obviously the refresh will fail. It might be worth trying to
 		// detect these cases and save the futile attempt; we'd need to have access
 		// to the key that generated the error.
-		timestamp.Forward(writeTooOldRetryTimestamp(txn, err))
+		timestamp.Forward(writeTooOldRetryTimestamp(err))
 	case *ReadWithinUncertaintyIntervalError:
 		timestamp.Forward(
 			readWithinUncertaintyIntervalRetryTimestamp(ctx, txn, err, pErr.OriginNode))
 	default:
 		return false, nil
 	}
-
-	newTxn := txn.Clone()
-	newTxn.WriteTimestamp.Forward(timestamp)
-	newTxn.ReadTimestamp.Forward(newTxn.WriteTimestamp)
-	newTxn.WriteTooOld = false
-
-	return true, newTxn
+	return PrepareTransactionForRefresh(txn, timestamp)
 }
 
 func readWithinUncertaintyIntervalRetryTimestamp(
@@ -1467,7 +1483,7 @@ func readWithinUncertaintyIntervalRetryTimestamp(
 	return ts
 }
 
-func writeTooOldRetryTimestamp(txn *Transaction, err *WriteTooOldError) hlc.Timestamp {
+func writeTooOldRetryTimestamp(err *WriteTooOldError) hlc.Timestamp {
 	return err.ActualTimestamp
 }
 
@@ -1569,6 +1585,12 @@ func confChangeImpl(
 			if err := checkNotExists(rDesc); err != nil {
 				return nil, err
 			}
+		case NON_VOTER:
+			// Like the case above, we must be removing a non-voter, so the target
+			// should be gone from the descriptor.
+			if err := checkNotExists(rDesc); err != nil {
+				return nil, err
+			}
 		case VOTER_FULL:
 			// A voter can't be in the descriptor if it's being removed.
 			if err := checkNotExists(rDesc); err != nil {
@@ -1602,6 +1624,11 @@ func confChangeImpl(
 			// ChangeReplicas txn that this learner is not currently a voter.
 			// Demotions (i.e. transitioning from voter to learner) are not
 			// represented in `added`; they're handled in `removed` above.
+			changeType = raftpb.ConfChangeAddLearnerNode
+		case NON_VOTER:
+			// We're adding a non-voter. Like the case above, we're guaranteed that
+			// this learner is not a voter. Promotions of non-voters to voters and
+			// demotions vice-versa are not currently supported.
 			changeType = raftpb.ConfChangeAddLearnerNode
 		default:
 			// A voter that is demoting was just removed and re-added in the
@@ -1711,13 +1738,13 @@ func (crt ChangeReplicasTrigger) SafeFormat(w redact.SafePrinter, _ rune) {
 		}
 	}
 	if len(added) > 0 {
-		w.Printf("%s%s", ADD_REPLICA, added)
+		w.Printf("%s", added)
 	}
 	if len(removed) > 0 {
 		if len(added) > 0 {
 			w.SafeString(", ")
 		}
-		w.Printf("%s%s", REMOVE_REPLICA, removed)
+		w.Printf("%s", removed)
 	}
 	w.Printf(": after=%s next=%d", afterReplicas, nextReplicaID)
 }
@@ -1756,7 +1783,7 @@ func (crt ChangeReplicasTrigger) legacy() (ReplicaDescriptor, bool) {
 
 // Added returns the replicas added by this change (if there are any).
 func (crt ChangeReplicasTrigger) Added() []ReplicaDescriptor {
-	if rDesc, ok := crt.legacy(); ok && crt.DeprecatedChangeType == ADD_REPLICA {
+	if rDesc, ok := crt.legacy(); ok && crt.DeprecatedChangeType == ADD_VOTER {
 		return []ReplicaDescriptor{rDesc}
 	}
 	return crt.InternalAddedReplicas
@@ -1767,7 +1794,7 @@ func (crt ChangeReplicasTrigger) Added() []ReplicaDescriptor {
 // transitioning to VOTER_{OUTGOING,DEMOTING} (from VOTER_FULL). The subsequent trigger
 // leaving the joint configuration has an empty Removed().
 func (crt ChangeReplicasTrigger) Removed() []ReplicaDescriptor {
-	if rDesc, ok := crt.legacy(); ok && crt.DeprecatedChangeType == REMOVE_REPLICA {
+	if rDesc, ok := crt.legacy(); ok && crt.DeprecatedChangeType == REMOVE_VOTER {
 		return []ReplicaDescriptor{rDesc}
 	}
 	return crt.InternalRemovedReplicas
@@ -1884,7 +1911,7 @@ func (l Lease) Equivalent(newL Lease) bool {
 
 		// For expiration-based leases, extensions are considered equivalent.
 		// This is the one case where Equivalent is not commutative and, as
-		// such, requires special handling beneath Raft (see checkForcedErrLocked).
+		// such, requires special handling beneath Raft (see checkForcedErr).
 		if l.GetExpiration().LessEq(newL.GetExpiration()) {
 			l.Expiration, newL.Expiration = nil, nil
 		}
@@ -1908,11 +1935,11 @@ func equivalentTimestamps(a, b *hlc.Timestamp) bool {
 		if b == nil {
 			return true
 		}
-		if (*b == hlc.Timestamp{}) {
+		if b.IsEmpty() {
 			return true
 		}
 	} else if b == nil {
-		if (*a == hlc.Timestamp{}) {
+		if a.IsEmpty() {
 			return true
 		}
 	}
@@ -1934,7 +1961,7 @@ func (l *Lease) Equal(that interface{}) bool {
 		if ok {
 			that1 = &that2
 		} else {
-			panic(fmt.Sprintf("attempting to compare lease to %T", that))
+			panic(errors.AssertionFailedf("attempting to compare lease to %T", that))
 		}
 	}
 	if that1 == nil {
@@ -1993,20 +2020,12 @@ func MakeLockAcquisition(txn *Transaction, key Key, dur lock.Durability) LockAcq
 }
 
 // MakeLockUpdate makes a lock update from the given txn and span.
+//
+// See also txn.LocksAsLockUpdates().
 func MakeLockUpdate(txn *Transaction, span Span) LockUpdate {
 	u := LockUpdate{Span: span}
 	u.SetTxn(txn)
 	return u
-}
-
-// AsLockUpdates takes a slice of spans and returns it as a slice of
-// lock updates.
-func AsLockUpdates(txn *Transaction, spans []Span) []LockUpdate {
-	ret := make([]LockUpdate, len(spans))
-	for i := range spans {
-		ret[i] = MakeLockUpdate(txn, spans[i])
-	}
-	return ret
 }
 
 // SetTxn updates the transaction details in the lock update.
@@ -2016,9 +2035,27 @@ func (u *LockUpdate) SetTxn(txn *Transaction) {
 	u.IgnoredSeqNums = txn.IgnoredSeqNums
 }
 
-// EqualValue compares for equality.
+// EqualValue is Equal.
+//
+// TODO(tbg): remove this passthrough.
 func (s Span) EqualValue(o Span) bool {
 	return s.Key.Equal(o.Key) && s.EndKey.Equal(o.EndKey)
+}
+
+// Equal compares two spans.
+func (s Span) Equal(o Span) bool {
+	return s.Key.Equal(o.Key) && s.EndKey.Equal(o.EndKey)
+}
+
+// Compare returns an integer comparing two Spans lexicographically.
+// The result will be 0 if s==o, -1 if s starts before o or if the starts
+// are equal and s ends before o, and +1 otherwise.
+func (s Span) Compare(o Span) int {
+	cmp := bytes.Compare(s.Key, o.Key)
+	if cmp == 0 {
+		return bytes.Compare(s.EndKey, o.EndKey)
+	}
+	return cmp
 }
 
 // Overlaps returns true WLOG for span A and B iff:
@@ -2157,7 +2194,7 @@ func (s Span) Valid() bool {
 // Spans is a slice of spans.
 type Spans []Span
 
-// implement Sort.Interface
+// Implement sort.Interface.
 func (a Spans) Len() int           { return len(a) }
 func (a Spans) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a Spans) Less(i, j int) bool { return a[i].Key.Compare(a[j].Key) < 0 }

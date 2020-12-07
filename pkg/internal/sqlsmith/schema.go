@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	// Import builtins so they are reflected in tree.FunDefs.
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
@@ -50,6 +52,10 @@ func (s *Smither) ReloadSchemas() error {
 		return err
 	}
 	s.tables, err = s.extractTables()
+	if err != nil {
+		return err
+	}
+	s.schemas, err = s.extractSchemas()
 	if err != nil {
 		return err
 	}
@@ -172,7 +178,7 @@ FROM
 		// Try to construct type information from the resulting row.
 		switch {
 		case len(members) > 0:
-			typ := types.MakeEnum(sqlbase.TypeIDToOID(descpb.ID(id)), 0 /* arrayTypeID */)
+			typ := types.MakeEnum(typedesc.TypeIDToOID(descpb.ID(id)), 0 /* arrayTypeID */)
 			typ.TypeMeta = types.UserDefinedTypeMetadata{
 				Name: &types.UserDefinedTypeName{
 					Schema: scName,
@@ -202,8 +208,33 @@ FROM
 	return &typeInfo{
 		udts:        udtMapping,
 		scalarTypes: append(udts, types.Scalar...),
-		seedTypes:   append(udts, sqlbase.SeedTypes...),
+		seedTypes:   append(udts, rowenc.SeedTypes...),
 	}, nil
+}
+
+type schemaRef struct {
+	SchemaName tree.Name
+}
+
+func (s *Smither) extractSchemas() ([]*schemaRef, error) {
+	rows, err := s.db.Query(`
+SELECT nspname FROM pg_catalog.pg_namespace
+WHERE nspname NOT IN ('crdb_internal', 'pg_catalog', 'pg_extension',
+		'information_schema')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ret []*schemaRef
+	for rows.Next() {
+		var schema tree.Name
+		if err := rows.Scan(&schema); err != nil {
+			return nil, err
+		}
+		ret = append(ret, &schemaRef{SchemaName: schema})
+	}
+	return ret, nil
 }
 
 func (s *Smither) extractTables() ([]*tableRef, error) {
@@ -220,7 +251,8 @@ SELECT
 FROM
 	information_schema.columns
 WHERE
-	table_schema = 'public'
+	table_schema NOT IN ('crdb_internal', 'pg_catalog', 'pg_extension',
+	                     'information_schema')
 ORDER BY
 	table_catalog, table_schema, table_name
 	`)
@@ -239,19 +271,20 @@ ORDER BY
 	var tables []*tableRef
 	var currentCols []*tree.ColumnTableDef
 	emit := func() error {
-		if lastSchema != "public" {
-			return nil
-		}
 		if len(currentCols) == 0 {
 			return fmt.Errorf("zero columns for %s.%s", lastCatalog, lastName)
 		}
 		// All non virtual tables contain implicit system columns.
-		currentCols = append(currentCols, &tree.ColumnTableDef{
-			Name: sqlbase.MVCCTimestampColumnName,
-			Type: sqlbase.MVCCTimestampColumnType,
-		})
+		for i := range colinfo.AllSystemColumnDescs {
+			col := &colinfo.AllSystemColumnDescs[i]
+			currentCols = append(currentCols, &tree.ColumnTableDef{
+				Name: tree.Name(col.Name),
+				Type: col.Type,
+			})
+		}
+		tableName := tree.MakeTableNameWithSchema(lastCatalog, lastSchema, lastName)
 		tables = append(tables, &tableRef{
-			TableName: tree.NewTableName(lastCatalog, lastName),
+			TableName: &tableName,
 			Columns:   currentCols,
 		})
 		return nil
@@ -281,7 +314,7 @@ ORDER BY
 			currentCols = nil
 		}
 
-		coltyp, err := s.typeFromName(typ)
+		coltyp, err := s.typeFromSQLTypeSyntax(typ)
 		if err != nil {
 			return nil, err
 		}
@@ -319,9 +352,13 @@ func (s *Smither) extractIndexes(
 		// sqlsmith.
 		rows, err := s.db.Query(fmt.Sprintf(`
 			SELECT
-			    index_name, column_name, storing, direction = 'ASC'
+			    si.index_name, column_name, storing, direction = 'ASC',
+          is_inverted
 			FROM
-			    [SHOW INDEXES FROM %s]
+			    [SHOW INDEXES FROM %s] si
+      JOIN crdb_internal.table_indexes ti
+           ON si.table_name = ti.descriptor_name
+           AND si.index_name = ti.index_name
 			WHERE
 			    column_name != 'rowid'
 			`, t.TableName))
@@ -330,15 +367,16 @@ func (s *Smither) extractIndexes(
 		}
 		for rows.Next() {
 			var idx, col tree.Name
-			var storing, ascending bool
-			if err := rows.Scan(&idx, &col, &storing, &ascending); err != nil {
+			var storing, ascending, inverted bool
+			if err := rows.Scan(&idx, &col, &storing, &ascending, &inverted); err != nil {
 				rows.Close()
 				return nil, err
 			}
 			if _, ok := indexes[idx]; !ok {
 				indexes[idx] = &tree.CreateIndex{
-					Name:  idx,
-					Table: *t.TableName,
+					Name:     idx,
+					Table:    *t.TableName,
+					Inverted: inverted,
 				}
 			}
 			create := indexes[idx]
@@ -354,25 +392,10 @@ func (s *Smither) extractIndexes(
 					Direction: dir,
 				})
 			}
-			row := s.db.QueryRow(fmt.Sprintf(`
-			SELECT
-			    is_inverted
-			FROM
-			    crdb_internal.table_indexes
-			WHERE
-			    descriptor_name = '%s' AND index_name = '%s'
-`, t.TableName.Table(), idx))
-			var isInverted bool
-			if err = row.Scan(&isInverted); err != nil {
-				// We got an error which likely indicates that 'is_inverted' column is
-				// not present in crdb_internal.table_indexes vtable (probably because
-				// we're running 19.2 version). We will use a heuristic to determine
-				// whether the index is inverted.
-				isInverted = strings.Contains(strings.ToLower(idx.String()), "jsonb")
-			}
-			indexes[idx].Inverted = isInverted
 		}
-		rows.Close()
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
@@ -412,7 +435,8 @@ var functions = func() map[tree.FunctionClass]map[oid.Oid][]function {
 		case "pg_sleep":
 			continue
 		}
-		if strings.Contains(def.Name, "crdb_internal.force_") {
+		if strings.Contains(def.Name, "crdb_internal.force_") ||
+			strings.Contains(def.Name, "crdb_internal.unsafe_") {
 			continue
 		}
 		if _, ok := m[def.Class]; !ok {

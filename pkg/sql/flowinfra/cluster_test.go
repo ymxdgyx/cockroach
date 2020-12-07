@@ -29,8 +29,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -40,8 +40,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,7 +50,7 @@ func TestClusterFlow(t *testing.T) {
 	const numRows = 100
 
 	args := base.TestClusterArgs{ReplicationMode: base.ReplicationManual}
-	tc := serverutils.StartTestCluster(t, 3, args)
+	tc := serverutils.StartNewTestCluster(t, 3, args)
 	defer tc.Stopper().Stop(context.Background())
 
 	sumDigitsFn := func(row int) tree.Datum {
@@ -71,7 +71,7 @@ func TestClusterFlow(t *testing.T) {
 	desc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
 	makeIndexSpan := func(start, end int) execinfrapb.TableReaderSpan {
 		var span roachpb.Span
-		prefix := roachpb.Key(sqlbase.MakeIndexKeyPrefix(keys.SystemSQLCodec, desc, desc.Indexes[0].ID))
+		prefix := roachpb.Key(rowenc.MakeIndexKeyPrefix(keys.SystemSQLCodec, desc, desc.Indexes[0].ID))
 		span.Key = append(prefix, encoding.EncodeVarintAscending(nil, int64(start))...)
 		span.EndKey = append(span.EndKey, prefix...)
 		span.EndKey = append(span.EndKey, encoding.EncodeVarintAscending(nil, int64(end))...)
@@ -87,7 +87,7 @@ func TestClusterFlow(t *testing.T) {
 
 	// Start a span (useful to look at spans using Lightstep).
 	sp := tc.Server(0).ClusterSettings().Tracer.StartSpan("cluster test")
-	ctx := opentracing.ContextWithSpan(context.Background(), sp)
+	ctx := tracing.ContextWithSpan(context.Background(), sp)
 	defer sp.Finish()
 
 	now := tc.Server(0).Clock().Now()
@@ -139,6 +139,7 @@ func TestClusterFlow(t *testing.T) {
 						{Type: execinfrapb.StreamEndpointSpec_REMOTE, StreamID: 0, TargetNodeID: tc.Server(2).NodeID()},
 					},
 				}},
+				ResultTypes: rowenc.TwoIntCols,
 			}},
 		},
 	}
@@ -161,6 +162,7 @@ func TestClusterFlow(t *testing.T) {
 						{Type: execinfrapb.StreamEndpointSpec_REMOTE, StreamID: 1, TargetNodeID: tc.Server(2).NodeID()},
 					},
 				}},
+				ResultTypes: rowenc.TwoIntCols,
 			}},
 		},
 	}
@@ -184,6 +186,7 @@ func TestClusterFlow(t *testing.T) {
 							{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: 2},
 						},
 					}},
+					ResultTypes: rowenc.TwoIntCols,
 				},
 				{
 					ProcessorID: 4,
@@ -196,9 +199,9 @@ func TestClusterFlow(t *testing.T) {
 							{Type: execinfrapb.StreamEndpointSpec_REMOTE, StreamID: 1},
 							{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: 2},
 						},
-						ColumnTypes: sqlbase.TwoIntCols,
+						ColumnTypes: rowenc.TwoIntCols,
 					}},
-					Core: execinfrapb.ProcessorCoreUnion{JoinReader: &execinfrapb.JoinReaderSpec{Table: *desc.TableDesc()}},
+					Core: execinfrapb.ProcessorCoreUnion{JoinReader: &execinfrapb.JoinReaderSpec{Table: *desc.TableDesc(), MaintainOrdering: true}},
 					Post: execinfrapb.PostProcessSpec{
 						Projection:    true,
 						OutputColumns: []uint32{2},
@@ -207,6 +210,7 @@ func TestClusterFlow(t *testing.T) {
 						Type:    execinfrapb.OutputRouterSpec_PASS_THROUGH,
 						Streams: []execinfrapb.StreamEndpointSpec{{Type: execinfrapb.StreamEndpointSpec_SYNC_RESPONSE}},
 					}},
+					ResultTypes: []*types.T{types.String},
 				},
 			},
 		},
@@ -248,7 +252,7 @@ func TestClusterFlow(t *testing.T) {
 	}
 
 	var decoder StreamDecoder
-	var rows sqlbase.EncDatumRows
+	var rows rowenc.EncDatumRows
 	var metas []execinfrapb.ProducerMetadata
 	for {
 		msg, err := stream.Recv()
@@ -328,7 +332,7 @@ func ignoreMetricsMeta(metas []execinfrapb.ProducerMetadata) []execinfrapb.Produ
 func TestLimitedBufferingDeadlock(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	tc := serverutils.StartTestCluster(t, 1, base.TestClusterArgs{})
+	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(context.Background())
 
 	// Set up the following network - a simplification of the one described in
@@ -375,10 +379,10 @@ func TestLimitedBufferingDeadlock(t *testing.T) {
 	typs := []*types.T{types.Int}
 
 	// The left values rows are consecutive values.
-	leftRows := make(sqlbase.EncDatumRows, 20)
+	leftRows := make(rowenc.EncDatumRows, 20)
 	for i := range leftRows {
-		leftRows[i] = sqlbase.EncDatumRow{
-			sqlbase.DatumToEncDatum(typs[0], tree.NewDInt(tree.DInt(i))),
+		leftRows[i] = rowenc.EncDatumRow{
+			rowenc.DatumToEncDatum(typs[0], tree.NewDInt(tree.DInt(i))),
 		}
 	}
 	leftValuesSpec, err := execinfra.GenerateValuesSpec(typs, leftRows, 10 /* rows per chunk */)
@@ -388,11 +392,11 @@ func TestLimitedBufferingDeadlock(t *testing.T) {
 
 	// The right values rows have groups of identical values (ensuring that large
 	// groups of rows go to the same hash bucket).
-	rightRows := make(sqlbase.EncDatumRows, 0)
+	rightRows := make(rowenc.EncDatumRows, 0)
 	for i := 1; i <= 20; i++ {
 		for j := 1; j <= 4*execinfra.RowChannelBufSize; j++ {
-			rightRows = append(rightRows, sqlbase.EncDatumRow{
-				sqlbase.DatumToEncDatum(typs[0], tree.NewDInt(tree.DInt(i))),
+			rightRows = append(rightRows, rowenc.EncDatumRow{
+				rowenc.DatumToEncDatum(typs[0], tree.NewDInt(tree.DInt(i))),
 			})
 		}
 	}
@@ -440,6 +444,7 @@ func TestLimitedBufferingDeadlock(t *testing.T) {
 							{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: 1},
 						},
 					}},
+					ResultTypes: typs,
 				},
 				// The right-hand Values processor in the diagram above.
 				{
@@ -452,6 +457,7 @@ func TestLimitedBufferingDeadlock(t *testing.T) {
 							{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: 3},
 						},
 					}},
+					ResultTypes: typs,
 				},
 				// The MergeJoin processor.
 				{
@@ -479,6 +485,7 @@ func TestLimitedBufferingDeadlock(t *testing.T) {
 							{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: 4},
 						},
 					}},
+					ResultTypes: typs,
 				},
 				// The final (Response) processor.
 				{
@@ -497,6 +504,7 @@ func TestLimitedBufferingDeadlock(t *testing.T) {
 						Type:    execinfrapb.OutputRouterSpec_PASS_THROUGH,
 						Streams: []execinfrapb.StreamEndpointSpec{{Type: execinfrapb.StreamEndpointSpec_SYNC_RESPONSE}},
 					}},
+					ResultTypes: typs,
 				},
 			},
 		},
@@ -518,7 +526,7 @@ func TestLimitedBufferingDeadlock(t *testing.T) {
 	}
 
 	var decoder StreamDecoder
-	var rows sqlbase.EncDatumRows
+	var rows rowenc.EncDatumRows
 	var metas []execinfrapb.ProducerMetadata
 	for {
 		msg, err := stream.Recv()
@@ -556,7 +564,7 @@ func TestDistSQLReadsFillGatewayID(t *testing.T) {
 	var foundReq int64 // written atomically
 	var expectedGateway roachpb.NodeID
 
-	tc := serverutils.StartTestCluster(t, 3, /* numNodes */
+	tc := serverutils.StartNewTestCluster(t, 3, /* numNodes */
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
 			ServerArgs: base.TestServerArgs{
@@ -615,7 +623,7 @@ func TestEvalCtxTxnOnRemoteNodes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ctx := context.Background()
 
-	tc := serverutils.StartTestCluster(t, 2, /* numNodes */
+	tc := serverutils.StartNewTestCluster(t, 2, /* numNodes */
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
 			ServerArgs: base.TestServerArgs{
@@ -669,7 +677,7 @@ func BenchmarkInfrastructure(b *testing.B) {
 	defer leaktest.AfterTest(b)()
 
 	args := base.TestClusterArgs{ReplicationMode: base.ReplicationManual}
-	tc := serverutils.StartTestCluster(b, 3, args)
+	tc := serverutils.StartNewTestCluster(b, 3, args)
 	defer tc.Stopper().Stop(context.Background())
 
 	for _, numNodes := range []int{1, 3} {
@@ -683,13 +691,13 @@ func BenchmarkInfrastructure(b *testing.B) {
 					valSpecs := make([]execinfrapb.ValuesCoreSpec, numNodes)
 					for i := range valSpecs {
 						se := StreamEncoder{}
-						se.Init(sqlbase.ThreeIntCols)
+						se.Init(rowenc.ThreeIntCols)
 						for j := 0; j < numRows; j++ {
-							row := make(sqlbase.EncDatumRow, 3)
+							row := make(rowenc.EncDatumRow, 3)
 							lastVal += rng.Intn(10)
-							row[0] = sqlbase.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(lastVal)))
-							row[1] = sqlbase.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(rng.Intn(100000))))
-							row[2] = sqlbase.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(rng.Intn(100000))))
+							row[0] = rowenc.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(lastVal)))
+							row[1] = rowenc.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(rng.Intn(100000))))
+							row[2] = rowenc.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(rng.Intn(100000))))
 							if err := se.AddRow(row); err != nil {
 								b.Fatal(err)
 							}
@@ -753,6 +761,7 @@ func BenchmarkInfrastructure(b *testing.B) {
 											{Type: streamType(i), StreamID: execinfrapb.StreamID(i), TargetNodeID: tc.Server(0).NodeID()},
 										},
 									}},
+									ResultTypes: rowenc.ThreeIntCols,
 								}},
 							},
 						}
@@ -774,13 +783,14 @@ func BenchmarkInfrastructure(b *testing.B) {
 							Ordering: execinfrapb.Ordering{Columns: []execinfrapb.Ordering_Column{
 								{ColIdx: 0, Direction: execinfrapb.Ordering_Column_ASC}}},
 							Streams:     inStreams,
-							ColumnTypes: sqlbase.ThreeIntCols,
+							ColumnTypes: rowenc.ThreeIntCols,
 						}},
 						Core: execinfrapb.ProcessorCoreUnion{Noop: &execinfrapb.NoopCoreSpec{}},
 						Output: []execinfrapb.OutputRouterSpec{{
 							Type:    execinfrapb.OutputRouterSpec_PASS_THROUGH,
 							Streams: []execinfrapb.StreamEndpointSpec{{Type: execinfrapb.StreamEndpointSpec_SYNC_RESPONSE}},
 						}},
+						ResultTypes: rowenc.ThreeIntCols,
 					}
 					if numNodes == 1 {
 						lastProc.Input[0].Type = execinfrapb.InputSyncSpec_UNORDERED
@@ -823,7 +833,7 @@ func BenchmarkInfrastructure(b *testing.B) {
 						}
 
 						var decoder StreamDecoder
-						var rows sqlbase.EncDatumRows
+						var rows rowenc.EncDatumRows
 						var metas []execinfrapb.ProducerMetadata
 						for {
 							msg, err := stream.Recv()
@@ -848,7 +858,7 @@ func BenchmarkInfrastructure(b *testing.B) {
 						if len(rows) != numNodes*numRows {
 							b.Errorf("got %d rows, expected %d", len(rows), numNodes*numRows)
 						}
-						var a sqlbase.DatumAlloc
+						var a rowenc.DatumAlloc
 						for i := range rows {
 							if err := rows[i][0].EnsureDecoded(types.Int, &a); err != nil {
 								b.Fatal(err)

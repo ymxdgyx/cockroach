@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/errors"
 )
 
@@ -55,6 +56,7 @@ func wrapError(err error) error {
 // the certificate manager.
 type SecurityContext struct {
 	security.CertsLocator
+	security.TLSSettings
 	config *base.Config
 	tenID  roachpb.TenantID
 	lazy   struct {
@@ -68,9 +70,12 @@ type SecurityContext struct {
 // MakeSecurityContext makes a SecurityContext.
 //
 // TODO(tbg): don't take a whole Config. This can be trimmed down significantly.
-func MakeSecurityContext(cfg *base.Config, tenID roachpb.TenantID) SecurityContext {
+func MakeSecurityContext(
+	cfg *base.Config, tlsSettings security.TLSSettings, tenID roachpb.TenantID,
+) SecurityContext {
 	return SecurityContext{
 		CertsLocator: security.MakeCertsLocator(cfg.SSLCertsDir),
+		TLSSettings:  tlsSettings,
 		config:       cfg,
 		tenID:        tenID,
 	}
@@ -86,7 +91,7 @@ func (ctx *SecurityContext) GetCertificateManager() (*security.CertificateManage
 			opts = append(opts, security.ForTenant(ctx.tenID.ToUint64()))
 		}
 		ctx.lazy.certificateManager.cm, ctx.lazy.certificateManager.err =
-			security.NewCertificateManager(ctx.config.SSLCertsDir, opts...)
+			security.NewCertificateManager(ctx.config.SSLCertsDir, ctx, opts...)
 
 		if ctx.lazy.certificateManager.err == nil && !ctx.config.Insecure {
 			infos, err := ctx.lazy.certificateManager.cm.ListCertificates()
@@ -118,27 +123,6 @@ func (ctx *SecurityContext) GetServerTLSConfig() (*tls.Config, error) {
 	}
 
 	tlsCfg, err := cm.GetServerTLSConfig()
-	if err != nil {
-		return nil, wrapError(err)
-	}
-	return tlsCfg, nil
-}
-
-// GetTenantServerTLSConfig returns the tenant server TLS config, initializing
-// it if needed. If Insecure is true, return a nil config, otherwise asks the
-// certificate manager for the tenant server TLS config.
-func (ctx *SecurityContext) GetTenantServerTLSConfig() (*tls.Config, error) {
-	// Early out.
-	if ctx.config.Insecure {
-		return nil, nil
-	}
-
-	cm, err := ctx.GetCertificateManager()
-	if err != nil {
-		return nil, wrapError(err)
-	}
-
-	tlsCfg, err := cm.GetTenantServerTLSConfig()
 	if err != nil {
 		return nil, wrapError(err)
 	}
@@ -252,8 +236,8 @@ func (ctx *SecurityContext) GetHTTPClient() (http.Client, error) {
 
 // getClientCertPaths returns the paths to the client cert and key. This uses
 // the node certs for the NodeUser, and the actual client certs for all others.
-func (ctx *SecurityContext) getClientCertPaths(user string) (string, string) {
-	if user == security.NodeUser {
+func (ctx *SecurityContext) getClientCertPaths(user security.SQLUsername) (string, string) {
+	if user.IsNodeUser() {
 		return ctx.NodeCertPath(), ctx.NodeKeyPath()
 	}
 	return ctx.ClientCertPath(user), ctx.ClientKeyPath(user)
@@ -277,7 +261,7 @@ func (ctx *SecurityContext) CheckCertificateAddrs(cctx context.Context) {
 	// with the provided certificate.
 	certInfo := cm.NodeCert()
 	if certInfo.Error != nil {
-		log.Shoutf(cctx, log.Severity_ERROR,
+		log.Shoutf(cctx, severity.ERROR,
 			"invalid node certificate: %v", certInfo.Error)
 	} else {
 		cert := certInfo.ParsedCertificates[0]
@@ -304,7 +288,7 @@ func (ctx *SecurityContext) CheckCertificateAddrs(cctx context.Context) {
 			fmt.Fprintf(&msg, "advertise SQL address %q not in node certificate (%s)\n", host, addrInfo)
 		}
 		if msg.Len() > 0 {
-			log.Shoutf(cctx, log.Severity_WARNING,
+			log.Shoutf(cctx, severity.WARNING,
 				"%s"+
 					"Secure client connections are likely to fail.\n"+
 					"Consider extending the node certificate or tweak --listen-addr/--advertise-addr/--sql-addr/--advertise-sql-addr.",
@@ -325,7 +309,7 @@ func (ctx *SecurityContext) CheckCertificateAddrs(cctx context.Context) {
 		certInfo = cm.NodeCert()
 	}
 	if certInfo.Error != nil {
-		log.Shoutf(cctx, log.Severity_ERROR,
+		log.Shoutf(cctx, severity.ERROR,
 			"invalid UI certificate: %v", certInfo.Error)
 	} else {
 		cert := certInfo.ParsedCertificates[0]

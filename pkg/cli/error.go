@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq"
@@ -69,12 +70,13 @@ func (f *formattedError) Error() string {
 	severity := "ERROR"
 
 	// Extract the fields.
-	var message, hint, detail, location string
+	var message, hint, detail, location, constraintName string
 	var code pgcode.Code
 	if pqErr := (*pq.Error)(nil); errors.As(f.err, &pqErr) {
 		if pqErr.Severity != "" {
 			severity = pqErr.Severity
 		}
+		constraintName = pqErr.Constraint
 		message = pqErr.Message
 		code = pgcode.MakeCode(string(pqErr.Code))
 		hint, detail = pqErr.Hint, pqErr.Detail
@@ -117,6 +119,9 @@ func (f *formattedError) Error() string {
 
 	if detail != "" {
 		fmt.Fprintln(&buf, "DETAIL:", detail)
+	}
+	if constraintName != "" {
+		fmt.Fprintln(&buf, "CONSTRAINT:", constraintName)
 	}
 	if hint != "" {
 		fmt.Fprintln(&buf, "HINT:", hint)
@@ -384,7 +389,7 @@ func checkAndMaybeShoutTo(
 	if err == nil {
 		return nil
 	}
-	severity := log.Severity_ERROR
+	severity := severity.ERROR
 	cause := err
 	var ec *cliError
 	if errors.As(err, &ec) {

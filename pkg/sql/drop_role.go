@@ -13,13 +13,15 @@ package sql
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
@@ -43,7 +45,7 @@ func (p *planner) DropRole(ctx context.Context, n *tree.DropRole) (planNode, err
 func (p *planner) DropRoleNode(
 	ctx context.Context, namesE tree.Exprs, ifExists bool, isRole bool, opName string,
 ) (*DropRoleNode, error) {
-	if err := p.HasRoleOption(ctx, roleoption.CREATEROLE); err != nil {
+	if err := p.CheckRoleOption(ctx, roleoption.CREATEROLE); err != nil {
 		return nil, err
 	}
 
@@ -82,7 +84,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 	}
 
 	// userNames maps users to the objects they own
-	userNames := make(map[string][]objectAndType)
+	userNames := make(map[security.SQLUsername][]objectAndType)
 	for i := range names {
 		name := names[i]
 		normalizedUsername, err := NormalizeAndValidateUsername(name)
@@ -91,8 +93,27 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		}
 
 		// Update the name in the names slice since we will re-use the name later.
-		names[i] = normalizedUsername
+		names[i] = normalizedUsername.Normalized()
 		userNames[normalizedUsername] = make([]objectAndType, 0)
+	}
+
+	// Non-admin users cannot drop admins.
+	hasAdmin, err := params.p.HasAdminRole(params.ctx)
+	if err != nil {
+		return err
+	}
+	if !hasAdmin {
+		for i := range names {
+			// Normalized above already.
+			name := security.MakeSQLUsernameFromPreNormalizedString(names[i])
+			targetIsAdmin, err := params.p.UserHasAdminRole(params.ctx, name)
+			if err != nil {
+				return err
+			}
+			if targetIsAdmin {
+				return pgerror.New(pgcode.InsufficientPrivilege, "must be superuser to drop superusers")
+			}
+		}
 	}
 
 	f := tree.NewFmtCtx(tree.FmtSimple)
@@ -100,17 +121,17 @@ func (n *DropRoleNode) startExec(params runParams) error {
 
 	// First check all the databases.
 	if err := forEachDatabaseDesc(params.ctx, params.p, nil /*nil prefix = all databases*/, true, /* requiresPrivileges */
-		func(db *sqlbase.ImmutableDatabaseDescriptor) error {
-			if _, ok := userNames[db.GetPrivileges().Owner]; ok {
-				userNames[db.GetPrivileges().Owner] = append(
-					userNames[db.GetPrivileges().Owner],
+		func(db *dbdesc.Immutable) error {
+			if _, ok := userNames[db.GetPrivileges().Owner()]; ok {
+				userNames[db.GetPrivileges().Owner()] = append(
+					userNames[db.GetPrivileges().Owner()],
 					objectAndType{
 						ObjectType: "database",
 						ObjectName: db.GetName(),
 					})
 			}
 			for _, u := range db.GetPrivileges().Users {
-				if _, ok := userNames[u.User]; ok {
+				if _, ok := userNames[u.User()]; ok {
 					if f.Len() > 0 {
 						f.WriteString(", ")
 					}
@@ -129,30 +150,32 @@ func (n *DropRoleNode) startExec(params runParams) error {
 	// the predefined forEachTableAll() function because we need to look
 	// at all _visible_ descriptors, not just those on which the current
 	// user has permission.
-	descs, err := params.p.Descriptors().GetAllDescriptors(params.ctx, params.p.txn)
+	descs, err := params.p.Descriptors().GetAllDescriptors(params.ctx, params.p.txn, true /* validate */)
 	if err != nil {
 		return err
 	}
 
-	lCtx := newInternalLookupCtx(descs, nil /*prefix - we want all descriptors */)
-	// TODO(richardjcai): Also need to add privilege checking for types and
-	// user defined schemas when they are added.
+	lCtx := newInternalLookupCtx(params.ctx, descs, nil /*prefix - we want all descriptors */, nil /* fallback */)
 	// privileges are added.
 	for _, tbID := range lCtx.tbIDs {
 		table := lCtx.tbDescs[tbID]
-		if !tableIsVisible(table, true /*allowAdding*/) {
+		if !descriptorIsVisible(table, true /*allowAdding*/) {
 			continue
 		}
-		if _, ok := userNames[table.GetPrivileges().Owner]; ok {
-			userNames[table.GetPrivileges().Owner] = append(
-				userNames[table.GetPrivileges().Owner],
+		if _, ok := userNames[table.GetPrivileges().Owner()]; ok {
+			tn, err := getTableNameFromTableDescriptor(lCtx, table, "")
+			if err != nil {
+				return err
+			}
+			userNames[table.GetPrivileges().Owner()] = append(
+				userNames[table.GetPrivileges().Owner()],
 				objectAndType{
 					ObjectType: "table",
-					ObjectName: table.GetName(),
+					ObjectName: tn.String(),
 				})
 		}
 		for _, u := range table.GetPrivileges().Users {
-			if _, ok := userNames[u.User]; ok {
+			if _, ok := userNames[u.User()]; ok {
 				if f.Len() > 0 {
 					f.WriteString(", ")
 				}
@@ -161,6 +184,39 @@ func (n *DropRoleNode) startExec(params runParams) error {
 				f.FormatNode(&tn)
 				break
 			}
+		}
+	}
+	for _, schemaDesc := range lCtx.schemaDescs {
+		if !descriptorIsVisible(schemaDesc, true /* allowAdding */) {
+			continue
+		}
+		// TODO(arul): Ideally this should be the fully qualified name of the schema,
+		// but at the time of writing there doesn't seem to be a clean way of doing
+		// this.
+		if _, ok := userNames[schemaDesc.GetPrivileges().Owner()]; ok {
+			userNames[schemaDesc.GetPrivileges().Owner()] = append(
+				userNames[schemaDesc.GetPrivileges().Owner()],
+				objectAndType{
+					ObjectType: "schema",
+					ObjectName: schemaDesc.GetName(),
+				})
+		}
+	}
+	for _, typDesc := range lCtx.typDescs {
+		if _, ok := userNames[typDesc.GetPrivileges().Owner()]; ok {
+			if !descriptorIsVisible(typDesc, true /* allowAdding */) {
+				continue
+			}
+			tn, err := getTypeNameFromTypeDescriptor(lCtx, typDesc)
+			if err != nil {
+				return err
+			}
+			userNames[typDesc.GetPrivileges().Owner()] = append(
+				userNames[typDesc.GetPrivileges().Owner()],
+				objectAndType{
+					ObjectType: "type",
+					ObjectName: tn.String(),
+				})
 		}
 	}
 
@@ -181,7 +237,9 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		)
 	}
 
-	for _, name := range names {
+	for i := range names {
+		// Name already normalized above.
+		name := security.MakeSQLUsernameFromPreNormalizedString(names[i])
 		// Did the user own any objects?
 		ownedObjects := userNames[name]
 		if len(ownedObjects) > 0 {
@@ -201,13 +259,31 @@ func (n *DropRoleNode) startExec(params runParams) error {
 	for normalizedUsername := range userNames {
 		// Specifically reject special users and roles. Some (root, admin) would fail with
 		// "privileges still exist" first.
-		if normalizedUsername == security.AdminRole || normalizedUsername == security.PublicRole {
+		if normalizedUsername.IsAdminRole() || normalizedUsername.IsPublicRole() {
 			return pgerror.Newf(
 				pgcode.InvalidParameterValue, "cannot drop special role %s", normalizedUsername)
 		}
-		if normalizedUsername == security.RootUser {
+		if normalizedUsername.IsRootUser() {
 			return pgerror.Newf(
 				pgcode.InvalidParameterValue, "cannot drop special user %s", normalizedUsername)
+		}
+
+		// Check if user owns any scheduled jobs.
+		numSchedulesRow, err := params.ExecCfg().InternalExecutor.QueryRow(
+			params.ctx,
+			"check-user-schedules",
+			params.p.txn,
+			"SELECT count(*) FROM system.scheduled_jobs WHERE owner=$1",
+			normalizedUsername,
+		)
+		if err != nil {
+			return err
+		}
+		numSchedules := int64(tree.MustBeDInt(numSchedulesRow[0]))
+		if numSchedules > 0 {
+			return pgerror.Newf(pgcode.DependentObjectsStillExist,
+				"cannot drop role/user %s; it owns %d scheduled jobs.",
+				normalizedUsername, numSchedules)
 		}
 
 		numUsersDeleted, err := params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
@@ -260,7 +336,18 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		}
 	}
 
-	return nil
+	sort.Strings(names)
+	return MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
+		params.ctx,
+		params.p.txn,
+		EventLogDropRole,
+		0, /* no target */
+		int32(params.extendedEvalCtx.NodeID.SQLInstanceID()),
+		struct {
+			RoleName string
+			User     string
+		}{strings.Join(names, ", "), params.p.User().Normalized()},
+	)
 }
 
 // Next implements the planNode interface.

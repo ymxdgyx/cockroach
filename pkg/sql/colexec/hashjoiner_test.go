@@ -29,13 +29,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
 var (
-	floats      = []float64{0.314, 3.14, 31.4, 314}
-	decs        []apd.Decimal
-	hjTestCases []*joinTestCase
+	floats = []float64{0.314, 3.14, 31.4, 314}
+	decs   []apd.Decimal
 )
 
 func init() {
@@ -44,11 +44,13 @@ func init() {
 	for i, f := range floats {
 		_, err := decs[i].SetFloat64(f)
 		if err != nil {
-			colexecerror.InternalError(fmt.Sprintf("%v", err))
+			colexecerror.InternalError(errors.AssertionFailedf("%v", err))
 		}
 	}
+}
 
-	hjTestCases = []*joinTestCase{
+func getHJTestCases() []*joinTestCase {
+	hjTestCases := []*joinTestCase{
 		{
 			description: "0",
 			leftTypes:   []*types.T{types.Int},
@@ -380,22 +382,22 @@ func init() {
 
 			leftTuples: tuples{
 				{0},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets},
+				{coldata.BatchSize()},
+				{coldata.BatchSize()},
+				{coldata.BatchSize()},
 				{0},
-				{HashTableNumBuckets * 2},
+				{coldata.BatchSize() * 2},
 				{1},
 				{1},
-				{HashTableNumBuckets + 1},
+				{coldata.BatchSize() + 1},
 			},
 			rightTuples: tuples{
-				{HashTableNumBuckets},
-				{HashTableNumBuckets * 2},
-				{HashTableNumBuckets * 3},
+				{coldata.BatchSize()},
+				{coldata.BatchSize() * 2},
+				{coldata.BatchSize() * 3},
 				{0},
 				{1},
-				{HashTableNumBuckets + 1},
+				{coldata.BatchSize() + 1},
 			},
 
 			leftEqCols:   []uint32{0},
@@ -408,15 +410,15 @@ func init() {
 			rightEqColsAreKey: false,
 
 			expected: tuples{
-				{HashTableNumBuckets, HashTableNumBuckets},
-				{HashTableNumBuckets, HashTableNumBuckets},
-				{HashTableNumBuckets, HashTableNumBuckets},
-				{HashTableNumBuckets * 2, HashTableNumBuckets * 2},
+				{coldata.BatchSize(), coldata.BatchSize()},
+				{coldata.BatchSize(), coldata.BatchSize()},
+				{coldata.BatchSize(), coldata.BatchSize()},
+				{coldata.BatchSize() * 2, coldata.BatchSize() * 2},
 				{0, 0},
 				{0, 0},
 				{1, 1},
 				{1, 1},
-				{HashTableNumBuckets + 1, HashTableNumBuckets + 1},
+				{coldata.BatchSize() + 1, coldata.BatchSize() + 1},
 			},
 		},
 		{
@@ -501,14 +503,14 @@ func init() {
 			// hash to the same bucket.
 			leftTuples: tuples{
 				{0},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets * 2},
-				{HashTableNumBuckets * 3},
+				{coldata.BatchSize()},
+				{coldata.BatchSize() * 2},
+				{coldata.BatchSize() * 3},
 			},
 			rightTuples: tuples{
 				{0},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets * 3},
+				{coldata.BatchSize()},
+				{coldata.BatchSize() * 3},
 			},
 
 			leftEqCols:   []uint32{0},
@@ -521,8 +523,8 @@ func init() {
 
 			expected: tuples{
 				{0},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets * 3},
+				{coldata.BatchSize()},
+				{coldata.BatchSize() * 3},
 			},
 		},
 		{
@@ -607,17 +609,17 @@ func init() {
 			// Test multiple column with values that hash to the same bucket.
 			leftTuples: tuples{
 				{10, 0, 0},
-				{20, 0, HashTableNumBuckets},
-				{40, HashTableNumBuckets, 0},
-				{50, HashTableNumBuckets, HashTableNumBuckets},
-				{60, HashTableNumBuckets * 2, 0},
-				{70, HashTableNumBuckets * 2, HashTableNumBuckets},
+				{20, 0, coldata.BatchSize()},
+				{40, coldata.BatchSize(), 0},
+				{50, coldata.BatchSize(), coldata.BatchSize()},
+				{60, coldata.BatchSize() * 2, 0},
+				{70, coldata.BatchSize() * 2, coldata.BatchSize()},
 			},
 			rightTuples: tuples{
-				{0, HashTableNumBuckets},
-				{HashTableNumBuckets * 2, HashTableNumBuckets},
+				{0, coldata.BatchSize()},
+				{coldata.BatchSize() * 2, coldata.BatchSize()},
 				{0, 0},
-				{0, HashTableNumBuckets * 2},
+				{0, coldata.BatchSize() * 2},
 			},
 
 			leftEqCols:   []uint32{1, 2},
@@ -629,8 +631,8 @@ func init() {
 			rightEqColsAreKey: true,
 
 			expected: tuples{
-				{20, 0, HashTableNumBuckets},
-				{70, HashTableNumBuckets * 2, HashTableNumBuckets},
+				{20, 0, coldata.BatchSize()},
+				{70, coldata.BatchSize() * 2, coldata.BatchSize()},
 				{10, 0, 0},
 			},
 		},
@@ -922,6 +924,7 @@ func init() {
 			expected:    tuples{{1}, {2}, {2}},
 		},
 	}
+	return withMirrors(hjTestCases)
 }
 
 // createSpecForHashJoiner creates a hash join processor spec based on a test
@@ -938,8 +941,19 @@ func createSpecForHashJoiner(tc *joinTestCase) *execinfrapb.ProcessorSpec {
 	projection := make([]uint32, 0, len(tc.leftOutCols)+len(tc.rightOutCols))
 	projection = append(projection, tc.leftOutCols...)
 	rColOffset := uint32(len(tc.leftTypes))
+	if !tc.joinType.ShouldIncludeLeftColsInOutput() {
+		rColOffset = 0
+	}
 	for _, outCol := range tc.rightOutCols {
 		projection = append(projection, rColOffset+outCol)
+	}
+	resultTypes := make([]*types.T, 0, len(projection))
+	for _, i := range projection {
+		if int(i) < len(tc.leftTypes) {
+			resultTypes = append(resultTypes, tc.leftTypes[i])
+		} else {
+			resultTypes = append(resultTypes, tc.rightTypes[i-rColOffset])
+		}
 	}
 	return &execinfrapb.ProcessorSpec{
 		Input: []execinfrapb.InputSyncSpec{
@@ -953,6 +967,7 @@ func createSpecForHashJoiner(tc *joinTestCase) *execinfrapb.ProcessorSpec {
 			Projection:    true,
 			OutputColumns: projection,
 		},
+		ResultTypes: resultTypes,
 	}
 }
 
@@ -992,7 +1007,7 @@ func TestHashJoiner(t *testing.T) {
 		Cfg:     &execinfra.ServerConfig{Settings: st},
 	}
 
-	for _, tcs := range [][]*joinTestCase{hjTestCases, mjTestCases} {
+	for _, tcs := range [][]*joinTestCase{getHJTestCases(), getMJTestCases()} {
 		for _, tc := range tcs {
 			for _, tc := range tc.mutateTypes() {
 				runHashJoinTestCase(t, tc, func(sources []colexecbase.Operator) (colexecbase.Operator, error) {
@@ -1067,16 +1082,15 @@ func BenchmarkHashJoiner(b *testing.B) {
 										if fullOuter {
 											joinType = descpb.FullOuterJoin
 										}
-										hjSpec, err := MakeHashJoinerSpec(
+										hjSpec := MakeHashJoinerSpec(
 											joinType,
 											[]uint32{0, 1}, []uint32{2, 3},
 											sourceTypes, sourceTypes,
 											rightDistinct,
 										)
-										require.NoError(b, err)
 										hj := NewHashJoiner(
-											testAllocator, hjSpec,
-											leftSource, rightSource,
+											testAllocator, testAllocator, hjSpec,
+											leftSource, rightSource, HashJoinerInitialNumBuckets,
 										)
 										hj.Init()
 
@@ -1172,6 +1186,7 @@ func TestHashJoinerProjection(t *testing.T) {
 			// from the left and from the right are intertwined.
 			OutputColumns: []uint32{3, 1, 0, 5, 4, 2},
 		},
+		ResultTypes: []*types.T{types.Int, types.Int, types.Bool, types.Decimal, types.Float, types.Bytes},
 	}
 
 	leftSource := newOpTestInput(1, leftTuples, leftTypes)

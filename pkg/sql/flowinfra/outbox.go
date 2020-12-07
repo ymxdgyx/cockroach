@@ -12,7 +12,6 @@ package flowinfra
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -20,14 +19,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
-	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	opentracing "github.com/opentracing/opentracing-go"
 )
 
 const outboxBufRows = 16
@@ -66,7 +63,7 @@ type Outbox struct {
 	err error
 
 	statsCollectionEnabled bool
-	stats                  OutboxStats
+	stats                  execinfrapb.ComponentStats
 }
 
 var _ execinfra.RowReceiver = &Outbox{}
@@ -117,7 +114,7 @@ func (m *Outbox) Init(typs []*types.T) {
 // too, or it might be an encoding error, in which case we've forwarded it on
 // the stream.
 func (m *Outbox) addRow(
-	ctx context.Context, row sqlbase.EncDatumRow, meta *execinfrapb.ProducerMetadata,
+	ctx context.Context, row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata,
 ) error {
 	mustFlush := false
 	var encodingErr error
@@ -131,6 +128,9 @@ func (m *Outbox) addRow(
 		if encodingErr != nil {
 			m.encoder.AddMetadata(ctx, execinfrapb.ProducerMetadata{Err: encodingErr})
 			mustFlush = true
+		}
+		if m.statsCollectionEnabled {
+			m.stats.NetTx.TuplesSent.Add(1)
 		}
 	}
 	m.numRows++
@@ -154,7 +154,7 @@ func (m *Outbox) flush(ctx context.Context) error {
 	}
 	msg := m.encoder.FormMessage(ctx)
 	if m.statsCollectionEnabled {
-		m.stats.BytesSent += int64(msg.Size())
+		m.stats.NetTx.BytesSent.Add(int64(msg.Size()))
 	}
 
 	if log.V(3) {
@@ -201,9 +201,9 @@ func (m *Outbox) mainLoop(ctx context.Context) error {
 	// writers could be writing to it as soon as we are started.
 	defer m.RowChannel.ConsumerClosed()
 
-	var span opentracing.Span
+	var span *tracing.Span
 	ctx, span = execinfra.ProcessorSpan(ctx, "outbox")
-	if span != nil && tracing.IsRecording(span) {
+	if span != nil && span.IsRecording() {
 		m.statsCollectionEnabled = true
 		span.SetTag(execinfrapb.FlowIDTagKey, m.flowCtx.ID.String())
 		span.SetTag(execinfrapb.StreamIDTagKey, m.streamID)
@@ -214,7 +214,7 @@ func (m *Outbox) mainLoop(ctx context.Context) error {
 	spanFinished := false
 	defer func() {
 		if !spanFinished {
-			tracing.FinishSpan(span)
+			span.Finish()
 		}
 	}()
 
@@ -283,11 +283,8 @@ func (m *Outbox) mainLoop(ctx context.Context) error {
 					if err != nil {
 						return err
 					}
-					if m.flowCtx.Cfg.TestingKnobs.DeterministicStats {
-						m.stats.BytesSent = 0
-					}
-					tracing.SetSpanStats(span, &m.stats)
-					tracing.FinishSpan(span)
+					span.SetSpanStats(&m.stats)
+					span.Finish()
 					spanFinished = true
 					if trace := execinfra.GetTraceData(ctx); trace != nil {
 						err := m.addRow(ctx, nil, &execinfrapb.ProducerMetadata{TraceData: trace})
@@ -411,10 +408,10 @@ func (m *Outbox) listenForDrainSignalFromConsumer(ctx context.Context) (<-chan d
 					return
 				}
 			case signal.SetupFlowRequest != nil:
-				log.Fatalf(ctx, "Unexpected SetupFlowRequest. "+
+				log.Fatalf(ctx, "unexpected SetupFlowRequest.\n"+
 					"This SyncFlow specific message should have been handled in RunSyncFlow.")
 			case signal.Handshake != nil:
-				log.Eventf(ctx, "Consumer sent handshake. Consuming flow scheduled: %t",
+				log.Eventf(ctx, "consumer sent handshake.\nConsuming flow scheduled: %t",
 					signal.Handshake.ConsumerScheduled)
 			}
 		}
@@ -453,18 +450,4 @@ func (m *Outbox) Start(ctx context.Context, wg *sync.WaitGroup, flowCtxCancel co
 // Err returns the error (if any occurred) while Outbox was running.
 func (m *Outbox) Err() error {
 	return m.err
-}
-
-const outboxTagPrefix = "outbox."
-
-// Stats implements the SpanStats interface.
-func (os *OutboxStats) Stats() map[string]string {
-	statsMap := make(map[string]string)
-	statsMap[outboxTagPrefix+"bytes_sent"] = humanizeutil.IBytes(os.BytesSent)
-	return statsMap
-}
-
-// StatsForQueryPlan implements the DistSQLSpanStats interface.
-func (os *OutboxStats) StatsForQueryPlan() []string {
-	return []string{fmt.Sprintf("bytes sent: %s", humanizeutil.IBytes(os.BytesSent))}
 }

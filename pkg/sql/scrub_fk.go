@@ -14,22 +14,23 @@ import (
 	"context"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/scrub"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
 // sqlForeignKeyCheckOperation is a check on an indexes physical data.
 type sqlForeignKeyCheckOperation struct {
 	tableName           *tree.TableName
-	tableDesc           *sqlbase.ImmutableTableDescriptor
-	referencedTableDesc *sqlbase.ImmutableTableDescriptor
+	tableDesc           *tabledesc.Immutable
+	referencedTableDesc *tabledesc.Immutable
 	constraint          *descpb.ConstraintDetail
 	asOf                hlc.Timestamp
 
-	colIDToRowIdx map[descpb.ColumnID]int
+	colIDToRowIdx catalog.TableColMap
 
 	run sqlForeignKeyConstraintCheckRun
 }
@@ -44,7 +45,7 @@ type sqlForeignKeyConstraintCheckRun struct {
 
 func newSQLForeignKeyCheckOperation(
 	tableName *tree.TableName,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	constraint descpb.ConstraintDetail,
 	asOf hlc.Timestamp,
 ) *sqlForeignKeyCheckOperation {
@@ -52,7 +53,7 @@ func newSQLForeignKeyCheckOperation(
 		tableName:           tableName,
 		tableDesc:           tableDesc,
 		constraint:          &constraint,
-		referencedTableDesc: sqlbase.NewImmutableTableDescriptor(*constraint.ReferencedTable),
+		referencedTableDesc: tabledesc.NewImmutable(*constraint.ReferencedTable),
 		asOf:                asOf,
 	}
 }
@@ -126,9 +127,8 @@ func (o *sqlForeignKeyCheckOperation) Start(params runParams) error {
 		}
 	}
 
-	o.colIDToRowIdx = make(map[descpb.ColumnID]int, len(colIDs))
 	for i, id := range colIDs {
-		o.colIDToRowIdx[id] = i
+		o.colIDToRowIdx.Set(id, i)
 	}
 
 	o.run.started = true
@@ -149,14 +149,14 @@ func (o *sqlForeignKeyCheckOperation) Next(params runParams) (tree.Datums, error
 	// pretty string.
 	primaryKeyDatums := make(tree.Datums, 0, len(o.tableDesc.PrimaryIndex.ColumnIDs))
 	for _, id := range o.tableDesc.PrimaryIndex.ColumnIDs {
-		idx := o.colIDToRowIdx[id]
+		idx := o.colIDToRowIdx.GetDefault(id)
 		primaryKeyDatums = append(primaryKeyDatums, row[idx])
 	}
 
 	// Collect all of the values fetched from the index to generate a
 	// pretty JSON dictionary for row_data.
 	for _, id := range o.constraint.FK.OriginColumnIDs {
-		idx := o.colIDToRowIdx[id]
+		idx := o.colIDToRowIdx.GetDefault(id)
 		col, err := o.tableDesc.FindActiveColumnByID(id)
 		if err != nil {
 			return nil, err
@@ -172,7 +172,7 @@ func (o *sqlForeignKeyCheckOperation) Next(params runParams) (tree.Datums, error
 			}
 		}
 		if !found {
-			idx := o.colIDToRowIdx[id]
+			idx := o.colIDToRowIdx.GetDefault(id)
 			col, err := o.tableDesc.FindActiveColumnByID(id)
 			if err != nil {
 				return nil, err

@@ -14,12 +14,13 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/errors"
 )
@@ -49,7 +50,7 @@ func (p *planner) AlterRoleNode(
 	// Note that for Postgres, only superuser can ALTER another superuser.
 	// CockroachDB does not support superuser privilege right now.
 	// However we make it so the admin role cannot be edited (done in startExec).
-	if err := p.HasRoleOption(ctx, roleoption.CREATEROLE); err != nil {
+	if err := p.CheckRoleOption(ctx, roleoption.CREATEROLE); err != nil {
 		return nil, err
 	}
 
@@ -64,6 +65,12 @@ func (p *planner) AlterRoleNode(
 		return nil, err
 	}
 
+	// Check that the requested combination of password options is
+	// compatible with the user's own CREATELOGIN privilege.
+	if err := p.checkPasswordOptionConstraints(ctx, roleOptions, false /* newUser */); err != nil {
+		return nil, err
+	}
+
 	ua, err := p.getUserAuthInfo(ctx, nameE, opName)
 	if err != nil {
 		return nil, err
@@ -75,6 +82,38 @@ func (p *planner) AlterRoleNode(
 		isRole:       isRole,
 		roleOptions:  roleOptions,
 	}, nil
+}
+
+func (p *planner) checkPasswordOptionConstraints(
+	ctx context.Context, roleOptions roleoption.List, newUser bool,
+) error {
+	if !p.EvalContext().Settings.Version.IsActive(ctx, clusterversion.CreateLoginPrivilege) {
+		// TODO(knz): Remove this condition in 21.1.
+		if roleOptions.Contains(roleoption.CREATELOGIN) || roleOptions.Contains(roleoption.NOCREATELOGIN) {
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				`granting CREATELOGIN or NOCREATELOGIN requires all nodes to be upgraded to %s`,
+				clusterversion.ByKey(clusterversion.CreateLoginPrivilege))
+		}
+	}
+
+	if roleOptions.Contains(roleoption.CREATELOGIN) ||
+		roleOptions.Contains(roleoption.NOCREATELOGIN) ||
+		roleOptions.Contains(roleoption.PASSWORD) ||
+		roleOptions.Contains(roleoption.VALIDUNTIL) ||
+		roleOptions.Contains(roleoption.LOGIN) ||
+		// CREATE ROLE NOLOGIN is valid without CREATELOGIN.
+		(roleOptions.Contains(roleoption.NOLOGIN) && !newUser) ||
+		// Disallow implicit LOGIN upon new user.
+		(newUser && !roleOptions.Contains(roleoption.NOLOGIN) && !roleOptions.Contains(roleoption.LOGIN)) {
+		// Only a role who has CREATELOGIN itself can grant CREATELOGIN or
+		// NOCREATELOGIN to another role, or set up a password for
+		// authentication, or set up password validity, or enable/disable
+		// LOGIN privilege; even if they have CREATEROLE privilege.
+		if err := p.CheckRoleOption(ctx, roleoption.CREATELOGIN); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (n *alterRoleNode) startExec(params runParams) error {
@@ -107,7 +146,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		params.ctx,
 		opName,
 		params.p.txn,
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		fmt.Sprintf("SELECT 1 FROM %s WHERE username = $1", userTableName),
 		normalizedUsername,
 	)
@@ -197,7 +236,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 			params.ctx,
 			opName,
 			params.p.txn,
-			sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			stmt,
 			qargs...,
 		)
@@ -206,7 +245,17 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		}
 	}
 
-	return nil
+	return MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
+		params.ctx,
+		params.p.txn,
+		EventLogAlterRole,
+		0, /* no target */
+		int32(params.extendedEvalCtx.NodeID.SQLInstanceID()),
+		struct {
+			RoleName string
+			User     string
+		}{normalizedUsername.Normalized(), params.p.User().Normalized()},
+	)
 }
 
 func (*alterRoleNode) Next(runParams) (bool, error) { return false, nil }

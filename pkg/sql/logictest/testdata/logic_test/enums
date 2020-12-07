@@ -1,9 +1,6 @@
 # LogicTest: !3node-tenant(49854)
 
 statement ok
-SET experimental_enable_enums=true;
-
-statement ok
 CREATE TYPE t AS ENUM ()
 
 statement error pq: relation "t" does not exist
@@ -107,13 +104,13 @@ true true true false true NULL NULL true true false true
 statement ok
 CREATE TYPE farewell AS ENUM ('bye', 'seeya')
 
-statement error pq: unsupported comparison operator: <greeting> = <farewell>
+statement error pq: invalid comparison between different enum types: <greeting> = <farewell>
 SELECT 'hello'::greeting = 'bye'::farewell
 
-statement error pq: unsupported comparison operator: <greeting> < <farewell>
+statement error pq: invalid comparison between different enum types: <greeting> < <farewell>
 SELECT 'hello'::greeting < 'bye'::farewell
 
-statement error pq: unsupported comparison operator: <greeting> <= <farewell>
+statement error pq: invalid comparison between different enum types: <greeting> <= <farewell>
 SELECT 'hello'::greeting <= 'bye'::farewell
 
 query T
@@ -436,10 +433,10 @@ FROM
 WHERE
   typname IN ('collision', '_collision', '__collision', '___collision')
 ----
-_collision    100082  0       100083
-__collision   100083  100082  0
-collision     100084  0       100085
-___collision  100085  100084  0
+_collision    100085  0       100086
+__collision   100086  100085  0
+collision     100087  0       100088
+___collision  100088  100087  0
 
 # Regression for #49756.
 query TT
@@ -450,7 +447,7 @@ FROM
 WHERE
   descriptor_name = 'enum_array' AND column_name = 'x'
 ----
-x  family:ArrayFamily width:0 precision:0 locale:"" visible_type:0 oid:100064 array_contents:<InternalType:<family:EnumFamily width:0 precision:0 locale:"" visible_type:0 oid:100063 time_precision_is_set:false udt_metadata:<array_type_oid:100064 > > TypeMeta:<Version:0 > > time_precision_is_set:false
+x  family:ArrayFamily width:0 precision:0 locale:"" visible_type:0 oid:100067 array_contents:<InternalType:<family:EnumFamily width:0 precision:0 locale:"" visible_type:0 oid:100066 time_precision_is_set:false udt_metadata:<array_type_oid:100067 > > TypeMeta:<Version:0 > > time_precision_is_set:false
 
 # Test tables using enums in DEFAULT expressions.
 statement ok
@@ -467,6 +464,22 @@ SELECT * FROM enum_default
 ----
 1 hello true
 2 hello true
+
+query T
+SELECT
+  pg_get_expr(d.adbin, d.adrelid)
+FROM
+  pg_attribute AS a
+  LEFT JOIN pg_attrdef AS d ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+  LEFT JOIN pg_type AS t ON a.atttypid = t.oid
+  LEFT JOIN pg_collation AS c ON
+    a.attcollation = c.oid AND a.attcollation != t.typcollation
+WHERE
+  a.attrelid = 'enum_default'::REGCLASS
+  AND NOT a.attisdropped
+  AND attname = 'y'
+----
+'hello'::public.greeting
 
 # Test that enum default values are formatted in human readable ways.
 query TT
@@ -1069,10 +1082,10 @@ CREATE TYPE local_type AS ENUM ('local');
 CREATE TABLE local_table (x INT);
 INSERT INTO local_table VALUES (1), (2)
 
-query TTT
+query T
 SELECT * FROM [EXPLAIN SELECT * FROM local_table] LIMIT 1
 ----
-·     distribution  local
+distribution: local
 
 statement ok
 ROLLBACK
@@ -1083,10 +1096,10 @@ ALTER TYPE greeting RENAME TO greeting_local;
 CREATE TABLE local_table (x INT);
 INSERT INTO local_table VALUES (1), (2)
 
-query TTT
+query T
 SELECT * FROM [EXPLAIN SELECT * FROM local_table] LIMIT 1
 ----
-·     distribution  local
+distribution: local
 
 statement ok
 ROLLBACK
@@ -1108,30 +1121,165 @@ local
 statement ok
 ROLLBACK
 
-query TTT
+query TTTT colnames
 SHOW ENUMS
 ----
-public as_bytes   bytes
-public dbs        postgres|mysql|spanner|cockroach
-public farewell   bye|seeya
-public greeting   hello|howdy|hi
-public greeting2  hello
-public int        Z|S of int
-public notbad     dup|DUP
+schema  name        values                              owner
+public  _collision  NULL                                root
+public  as_bytes    {bytes}                             root
+public  collision   NULL                                root
+public  dbs         {postgres,mysql,spanner,cockroach}  root
+public  empty       NULL                                root
+public  farewell    {bye,seeya}                         root
+public  greeting    {hello,howdy,hi}                    root
+public  greeting2   {hello}                             root
+public  int         {Z,"S of int"}                      root
+public  notbad      {dup,DUP}                           root
+public  t           NULL                                root
+
+query TTT colnames
+SHOW TYPES
+----
+schema  name        owner
+public  _collision  root
+public  as_bytes    root
+public  collision   root
+public  dbs         root
+public  empty       root
+public  farewell    root
+public  greeting    root
+public  greeting2   root
+public  int         root
+public  notbad      root
+public  t           root
 
 statement ok
-SET experimental_enable_user_defined_schemas = true;
 CREATE SCHEMA uds;
 CREATE TYPE uds.typ AS ENUM ('schema')
 
-query TTT
+query TTTT colnames
 SHOW ENUMS
 ----
-public as_bytes   bytes
-public dbs        postgres|mysql|spanner|cockroach
-public farewell   bye|seeya
-public greeting   hello|howdy|hi
-public greeting2  hello
-public int        Z|S of int
-public notbad     dup|DUP
-uds    typ        schema
+schema  name        values                              owner
+public  _collision  NULL                                root
+public  as_bytes    {bytes}                             root
+public  collision   NULL                                root
+public  dbs         {postgres,mysql,spanner,cockroach}  root
+public  empty       NULL                                root
+public  farewell    {bye,seeya}                         root
+public  greeting    {hello,howdy,hi}                    root
+public  greeting2   {hello}                             root
+public  int         {Z,"S of int"}                      root
+public  notbad      {dup,DUP}                           root
+public  t           NULL                                root
+uds     typ         {schema}                            root
+
+statement error pq: cannot create "fakedb.typ" because the target database or schema does not exist
+CREATE TYPE fakedb.typ AS ENUM ('schema')
+
+# Test the behavior of dropping a not-null enum colums
+
+subtest drop_not_null
+
+statement ok
+CREATE TYPE enum_with_vals AS ENUM ('val', 'other_val');
+
+statement ok
+CREATE TABLE table_with_not_null_enum (i INT PRIMARY KEY, v enum_with_vals NOT NULL);
+
+statement ok
+BEGIN;
+
+statement ok
+ALTER TABLE table_with_not_null_enum DROP COLUMN v;
+
+statement ok
+INSERT INTO table_with_not_null_enum VALUES (1);
+
+statement ok
+COMMIT; DROP TABLE table_with_not_null_enum; DROP TYPE enum_with_vals;
+
+statement ok
+CREATE TYPE enum_with_no_vals AS ENUM ();
+
+statement ok
+CREATE TABLE table_with_not_null_enum_no_vals (i INT PRIMARY KEY, v enum_with_no_vals NOT NULL);
+
+statement ok
+BEGIN;
+
+statement ok
+ALTER TABLE table_with_not_null_enum_no_vals DROP COLUMN v;
+
+statement error enum_with_no_vals has no values which can be used to satisfy the NOT NULL constraint while adding or dropping
+INSERT INTO table_with_not_null_enum_no_vals VALUES (1);
+
+statement ok
+ROLLBACK; DROP TABLE table_with_not_null_enum_no_vals; DROP TYPE enum_with_no_vals;
+
+# Regression test that hydrating descriptors does not happen on dropped
+# descriptors. See #54343.
+
+subtest dropped_database_with_enum
+
+statement ok
+CREATE DATABASE to_drop;
+USE to_drop;
+CREATE TYPE greeting AS ENUM ('hi');
+CREATE TABLE t(a greeting);
+USE defaultdb;
+DROP DATABASE to_drop CASCADE;
+
+# Before the bug-fix which introduced this test, this call would load all
+# descriptors, including dropped ones, and hydrate them, causing a panic as
+# the referenced type no longer exists.
+statement ok
+SELECT * FROM crdb_internal.tables
+
+statement ok
+create DATABASE test_57196;
+CREATE SCHEMA test_57196.sc;
+CREATE TYPE test_57196.public.greeting AS ENUM ('hi');
+CREATE TYPE test_57196.sc.greeting AS ENUM('hello');
+
+query TTTT colnames
+SHOW ENUMS FROM test_57196.public
+----
+schema  name      values  owner
+public  greeting  {hi}    root
+
+query TTTT colnames
+SHOW ENUMS FROM test_57196.sc
+----
+schema  name      values   owner
+sc      greeting  {hello}  root
+
+# In this context, test_57196 will be resolved to a database because of our
+# legacy name resolution compat. In other words, this is analogous to test_57196.public
+query TTTT colnames
+SHOW ENUMS FROM test_57196
+----
+schema  name      values  owner
+public  greeting  {hi}    root
+
+statement ok
+USE test_57196
+
+query TTTT colnames
+SHOW ENUMS
+----
+schema  name      values   owner
+public  greeting  {hi}     root
+sc      greeting  {hello}  root
+
+query TTTT colnames
+SHOW ENUMS FROM public
+----
+schema  name      values  owner
+public  greeting  {hi}    root
+
+query TTTT colnames
+SHOW ENUMS FROM sc
+----
+schema  name      values   owner
+sc      greeting  {hello}  root

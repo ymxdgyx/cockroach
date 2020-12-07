@@ -805,6 +805,26 @@ func (b *Builder) constructAggregate(name string, args []opt.ScalarExpr) opt.Sca
 		return b.factory.ConstructCount(args[0])
 	case "count_rows":
 		return b.factory.ConstructCountRows()
+	case "covar_pop":
+		return b.factory.ConstructCovarPop(args[0], args[1])
+	case "covar_samp":
+		return b.factory.ConstructCovarSamp(args[0], args[1])
+	case "regr_avgx":
+		return b.factory.ConstructRegressionAvgX(args[0], args[1])
+	case "regr_intercept":
+		return b.factory.ConstructRegressionIntercept(args[0], args[1])
+	case "regr_r2":
+		return b.factory.ConstructRegressionR2(args[0], args[1])
+	case "regr_slope":
+		return b.factory.ConstructRegressionSlope(args[0], args[1])
+	case "regr_sxx":
+		return b.factory.ConstructRegressionSXX(args[0], args[1])
+	case "regr_sxy":
+		return b.factory.ConstructRegressionSXY(args[0], args[1])
+	case "regr_syy":
+		return b.factory.ConstructRegressionSYY(args[0], args[1])
+	case "regr_count":
+		return b.factory.ConstructRegressionCount(args[0], args[1])
 	case "max":
 		return b.factory.ConstructMax(args[0])
 	case "min":
@@ -825,6 +845,12 @@ func (b *Builder) constructAggregate(name string, args []opt.ScalarExpr) opt.Sca
 		return b.factory.ConstructVarPop(args[0])
 	case "st_makeline":
 		return b.factory.ConstructSTMakeLine(args[0])
+	case "st_collect", "st_memcollect":
+		return b.factory.ConstructSTCollect(args[0])
+	case "st_extent":
+		return b.factory.ConstructSTExtent(args[0])
+	case "st_union", "st_memunion":
+		return b.factory.ConstructSTUnion(args[0])
 	case "xor_agg":
 		return b.factory.ConstructXorAgg(args[0])
 	case "json_agg":
@@ -888,7 +914,7 @@ func (b *Builder) allowImplicitGroupingColumn(colID opt.ColumnID, g *groupby) bo
 	}
 	primaryIndex := tab.Index(cat.PrimaryIndex)
 	for i := 0; i < primaryIndex.KeyColumnCount(); i++ {
-		pkCols.Add(colMeta.Table.ColumnID(primaryIndex.Column(i).Ordinal))
+		pkCols.Add(colMeta.Table.IndexColumnID(primaryIndex, i))
 	}
 	// Remove PK columns that are grouping cols and see if there's anything left.
 	groupingCols := g.groupingCols()

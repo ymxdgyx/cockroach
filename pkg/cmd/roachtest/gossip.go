@@ -117,7 +117,7 @@ SELECT string_agg(source_id::TEXT || ':' || target_id::TEXT, ',')
 	}
 
 	r.Add(testSpec{
-		Name:    fmt.Sprintf("gossip/chaos/nodes=9"),
+		Name:    "gossip/chaos/nodes=9",
 		Owner:   OwnerKV,
 		Cluster: makeClusterSpec(9),
 		Run: func(ctx context.Context, t *test, c *cluster) {
@@ -271,6 +271,9 @@ func runGossipPeerings(ctx context.Context, t *test, c *cluster) {
 		t.l.Printf("%d: restarting node %d\n", i, node[0])
 		c.Stop(ctx, node)
 		c.Start(ctx, t, node)
+		// Sleep a bit to avoid hitting:
+		// https://github.com/cockroachdb/cockroach/issues/48005
+		time.Sleep(3 * time.Second)
 	}
 }
 

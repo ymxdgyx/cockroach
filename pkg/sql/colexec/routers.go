@@ -12,7 +12,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -153,6 +152,13 @@ type routerOutputOp struct {
 		blocked   bool
 	}
 
+	// pendingBatchCapacity indicates the capacity which the new mu.pendingBatch
+	// should be allocated with. It'll increase dynamically until
+	// coldata.BatchSize(). We need to track it ourselves since the pending
+	// batch ownership is given to the spillingQueue, so when using
+	// ResetMaybeReallocate, we don't the old batch to check the capacity of.
+	pendingBatchCapacity int
+
 	testingKnobs routerOutputOpTestingKnobs
 }
 
@@ -164,7 +170,7 @@ func (o *routerOutputOp) Child(nth int, verbose bool) execinfra.OpNode {
 	if nth == 0 {
 		return o.input
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid index %d", nth))
+	colexecerror.InternalError(errors.AssertionFailedf("invalid index %d", nth))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
 }
@@ -362,7 +368,7 @@ func (o *routerOutputOp) forwardErr(err error) {
 // an empty selection slice will add no elements. Note that the selection vector
 // on the batch is ignored. This is so that callers of addBatch can push the
 // same batch with different selection vectors to many different outputs.
-// True is returned if the the output changes state to blocked (note: if the
+// True is returned if the output changes state to blocked (note: if the
 // output is already blocked, false is returned).
 // TODO(asubiotto): We should explore pipelining addBatch if disk-spilling
 //  performance becomes a concern. The main router goroutine will be writing to
@@ -412,7 +418,22 @@ func (o *routerOutputOp) addBatch(ctx context.Context, batch coldata.Batch, sele
 
 	for toAppend := len(selection); toAppend > 0; {
 		if o.mu.pendingBatch == nil {
-			o.mu.pendingBatch = o.mu.unlimitedAllocator.NewMemBatchWithFixedCapacity(o.types, coldata.BatchSize())
+			if o.pendingBatchCapacity < coldata.BatchSize() {
+				// We still haven't reached the maximum capacity, so let's
+				// calculate the next capacity to use.
+				if o.pendingBatchCapacity == 0 {
+					// This is the first set of tuples that are added to this
+					// router output, so we'll allocate the batch with just
+					// enough capacity to fill all of these tuples.
+					o.pendingBatchCapacity = len(selection)
+				} else {
+					o.pendingBatchCapacity *= 2
+				}
+			}
+			// Note: we could have used NewMemBatchWithFixedCapacity here, but
+			// we choose not to in order to indicate that the capacity of the
+			// pending batches has dynamic behavior.
+			o.mu.pendingBatch, _ = o.mu.unlimitedAllocator.ResetMaybeReallocate(o.types, nil /* oldBatch */, o.pendingBatchCapacity)
 		}
 		available := o.mu.pendingBatch.Capacity() - o.mu.pendingBatch.Length()
 		numAppended := toAppend
@@ -479,6 +500,7 @@ func (o *routerOutputOp) resetForTests(ctx context.Context) {
 	o.mu.data.reset(ctx)
 	o.mu.numUnread = 0
 	o.mu.blocked = false
+	o.pendingBatchCapacity = 0
 }
 
 // hashRouterDrainState is a state that specifically describes the hashRouter's
@@ -505,8 +527,6 @@ const (
 // returned by the constructor.
 type HashRouter struct {
 	OneInputNode
-	// types are the input types.
-	types []*types.T
 	// hashCols is a slice of indices of the columns used for hashing.
 	hashCols []uint32
 
@@ -517,7 +537,7 @@ type HashRouter struct {
 	metadataSources execinfrapb.MetadataSources
 	// closers is a slice of Closers that need to be closed when the hash router
 	// terminates.
-	closers Closers
+	closers colexecbase.Closers
 
 	// unblockedEventsChan is a channel shared between the HashRouter and its
 	// outputs. outputs send events on this channel when they are unblocked by a
@@ -565,7 +585,7 @@ func NewHashRouter(
 	fdSemaphore semaphore.Semaphore,
 	diskAccounts []*mon.BoundAccount,
 	toDrain []execinfrapb.MetadataSource,
-	toClose []Closer,
+	toClose []colexecbase.Closer,
 ) (*HashRouter, []colexecbase.DrainableOperator) {
 	if diskQueueCfg.CacheMode != colcontainer.DiskQueueCacheModeDefault {
 		colexecerror.InternalError(errors.Errorf("hash router instantiated with incompatible disk queue cache mode: %d", diskQueueCfg.CacheMode))
@@ -596,21 +616,19 @@ func NewHashRouter(
 		outputs[i] = op
 		outputsAsOps[i] = op
 	}
-	return newHashRouterWithOutputs(input, types, hashCols, unblockEventsChan, outputs, toDrain, toClose), outputsAsOps
+	return newHashRouterWithOutputs(input, hashCols, unblockEventsChan, outputs, toDrain, toClose), outputsAsOps
 }
 
 func newHashRouterWithOutputs(
 	input colexecbase.Operator,
-	types []*types.T,
 	hashCols []uint32,
 	unblockEventsChan <-chan struct{},
 	outputs []routerOutput,
 	toDrain []execinfrapb.MetadataSource,
-	toClose []Closer,
+	toClose []colexecbase.Closer,
 ) *HashRouter {
 	r := &HashRouter{
 		OneInputNode:        NewOneInputNode(input),
-		types:               types,
 		hashCols:            hashCols,
 		outputs:             outputs,
 		closers:             toClose,
@@ -739,7 +757,7 @@ func (r *HashRouter) processNextBatch(ctx context.Context) bool {
 		return true
 	}
 
-	selections := r.tupleDistributor.distribute(ctx, b, r.types, r.hashCols)
+	selections := r.tupleDistributor.distribute(ctx, b, r.hashCols)
 	for i, o := range r.outputs {
 		if o.addBatch(ctx, b, selections[i]) {
 			// This batch blocked the output.

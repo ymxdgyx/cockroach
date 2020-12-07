@@ -22,13 +22,24 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 	"github.com/dustin/go-humanize"
 	"github.com/gogo/protobuf/types"
 )
+
+// DiagramFlags contains diagram settings.
+type DiagramFlags struct {
+	// ShowInputTypes adds input type information.
+	ShowInputTypes bool
+
+	// MakeDeterministic resets all stats that can vary from run to run (like
+	// execution time), suitable for tests. See CompositeStats.MakeDeterministic.
+	MakeDeterministic bool
+}
 
 type diagramCellType interface {
 	// summary produces a title and an arbitrary number of lines that describe a
@@ -66,6 +77,13 @@ func colListStr(cols []uint32) string {
 // summary implements the diagramCellType interface.
 func (*NoopCoreSpec) summary() (string, []string) {
 	return "No-op", []string{}
+}
+
+// summary implements the diagramCellType interface.
+func (f *FiltererSpec) summary() (string, []string) {
+	return "Filterer", []string{
+		fmt.Sprintf("Filter: %s", f.Filter),
+	}
 }
 
 // summary implements the diagramCellType interface.
@@ -130,14 +148,14 @@ func (tr *TableReaderSpec) summary() (string, []string) {
 	details := []string{indexDetail(&tr.Table, tr.IndexIdx)}
 
 	if len(tr.Spans) > 0 {
-		tbl := sqlbase.NewImmutableTableDescriptor(tr.Table)
+		tbl := tabledesc.NewImmutable(tr.Table)
 		// only show the first span
 		idx, _, _ := tbl.FindIndexByIndexIdx(int(tr.IndexIdx))
-		valDirs := sqlbase.IndexKeyValDirs(idx)
+		valDirs := catalogkeys.IndexKeyValDirs(idx)
 
 		var spanStr strings.Builder
 		spanStr.WriteString("Spans: ")
-		spanStr.WriteString(sqlbase.PrettySpan(valDirs, tr.Spans[0].Span, 2))
+		spanStr.WriteString(catalogkeys.PrettySpan(valDirs, tr.Spans[0].Span, 2))
 
 		if len(tr.Spans) > 1 {
 			spanStr.WriteString(fmt.Sprintf(" and %d other", len(tr.Spans)-1))
@@ -155,7 +173,7 @@ func (tr *TableReaderSpec) summary() (string, []string) {
 
 // summary implements the diagramCellType interface.
 func (jr *JoinReaderSpec) summary() (string, []string) {
-	details := make([]string, 0, 4)
+	details := make([]string, 0, 5)
 	if jr.Type != descpb.InnerJoin {
 		details = append(details, joinTypeDetail(jr.Type))
 	}
@@ -165,6 +183,9 @@ func (jr *JoinReaderSpec) summary() (string, []string) {
 	}
 	if !jr.OnExpr.Empty() {
 		details = append(details, fmt.Sprintf("ON %s", jr.OnExpr))
+	}
+	if jr.LeftJoinWithPairedJoiner {
+		details = append(details, "second join in paired-join")
 	}
 	return "JoinReader", details
 }
@@ -197,9 +218,6 @@ func (hj *HashJoinerSpec) summary() (string, []string) {
 	}
 	if !hj.OnExpr.Empty() {
 		details = append(details, fmt.Sprintf("ON %s", hj.OnExpr))
-	}
-	if hj.MergedColumns {
-		details = append(details, fmt.Sprintf("Merged columns: %d", len(hj.LeftEqColumns)))
 	}
 
 	return name, details
@@ -251,33 +269,6 @@ func (mj *MergeJoinerSpec) summary() (string, []string) {
 }
 
 // summary implements the diagramCellType interface.
-func (irj *InterleavedReaderJoinerSpec) summary() (string, []string) {
-	// As of right now, we only plan InterleaveReaderJoiner with two
-	// tables.
-	tables := irj.Tables[:2]
-	details := make([]string, 0, len(tables)*6+3)
-	for i, table := range tables {
-		// left or right label
-		var tableLabel string
-		if i == 0 {
-			tableLabel = "Left"
-		} else if i == 1 {
-			tableLabel = "Right"
-		}
-		details = append(details, tableLabel)
-		// table@index name
-		details = append(details, indexDetail(&table.Desc, table.IndexIdx))
-		// Post process (filters, projections, renderExprs, limits/offsets)
-		details = append(details, table.Post.summaryWithPrefix(fmt.Sprintf("%s ", tableLabel))...)
-	}
-	details = append(details, "Joiner")
-	details = append(
-		details, orderedJoinDetails(irj.Type, tables[0].Ordering, tables[1].Ordering, irj.OnExpr)...,
-	)
-	return "InterleaveReaderJoiner", details
-}
-
-// summary implements the diagramCellType interface.
 func (zj *ZigzagJoinerSpec) summary() (string, []string) {
 	name := "ZigzagJoiner"
 	tables := zj.Tables
@@ -295,7 +286,7 @@ func (zj *ZigzagJoinerSpec) summary() (string, []string) {
 
 // summary implements the diagramCellType interface.
 func (ij *InvertedJoinerSpec) summary() (string, []string) {
-	details := make([]string, 0, 4)
+	details := make([]string, 0, 5)
 	if ij.Type != descpb.InnerJoin {
 		details = append(details, joinTypeDetail(ij.Type))
 	}
@@ -303,6 +294,9 @@ func (ij *InvertedJoinerSpec) summary() (string, []string) {
 	details = append(details, fmt.Sprintf("InvertedExpr %s", ij.InvertedExpr))
 	if !ij.OnExpr.Empty() {
 		details = append(details, fmt.Sprintf("ON %s", ij.OnExpr))
+	}
+	if ij.OutputGroupContinuationForLeftRow {
+		details = append(details, "first join in paired-join")
 	}
 	return "InvertedJoiner", details
 }
@@ -323,6 +317,29 @@ func (bf *BackfillerSpec) summary() (string, []string) {
 		fmt.Sprintf("Type: %s", bf.Type.String()),
 	}
 	return "Backfiller", details
+}
+
+// summary implements the diagramCellType interface.
+func (m *BackupDataSpec) summary() (string, []string) {
+	var spanStr strings.Builder
+	if len(m.Spans) > 0 {
+		spanStr.WriteString(fmt.Sprintf("Spans [%d]: ", len(m.Spans)))
+		const limit = 3
+		for i := 0; i < len(m.Spans) && i < limit; i++ {
+			if i > 0 {
+				spanStr.WriteString(", ")
+			}
+			spanStr.WriteString(m.Spans[i].String())
+		}
+		if len(m.Spans) > limit {
+			spanStr.WriteString("...")
+		}
+	}
+
+	details := []string{
+		spanStr.String(),
+	}
+	return "BACKUP", details
 }
 
 // summary implements the diagramCellType interface.
@@ -395,7 +412,7 @@ func (is *InputSyncSpec) summary(showTypes bool) (string, []string) {
 
 // summary implements the diagramCellType interface.
 func (r *LocalPlanNodeSpec) summary() (string, []string) {
-	return fmt.Sprintf("local %s %d", *r.Name, *r.RowSourceIdx), []string{}
+	return fmt.Sprintf("local %s %d", r.Name, r.RowSourceIdx), []string{}
 }
 
 // summary implements the diagramCellType interface.
@@ -423,9 +440,6 @@ func (post *PostProcessSpec) summary() []string {
 // (namely InterleavedReaderJoiner) that have multiple PostProcessors.
 func (post *PostProcessSpec) summaryWithPrefix(prefix string) []string {
 	var res []string
-	if !post.Filter.Empty() {
-		res = append(res, fmt.Sprintf("%sFilter: %s", prefix, post.Filter))
-	}
 	if post.Projection {
 		outputColumns := "None"
 		if len(post.OutputColumns) > 0 {
@@ -554,7 +568,7 @@ type FlowDiagram interface {
 	ToURL() (string, url.URL, error)
 
 	// AddSpans adds stats extracted from the input spans to the diagram.
-	AddSpans([]tracing.RecordedSpan)
+	AddSpans([]tracingpb.RecordedSpan)
 }
 
 type diagramData struct {
@@ -563,6 +577,7 @@ type diagramData struct {
 	Processors []diagramProcessor `json:"processors"`
 	Edges      []diagramEdge      `json:"edges"`
 
+	flags  DiagramFlags
 	flowID FlowID
 }
 
@@ -578,8 +593,8 @@ func (d diagramData) ToURL() (string, url.URL, error) {
 }
 
 // AddSpans implements the FlowDiagram interface.
-func (d *diagramData) AddSpans(spans []tracing.RecordedSpan) {
-	processorStats, streamStats := extractStatsFromSpans(d.flowID, spans)
+func (d *diagramData) AddSpans(spans []tracingpb.RecordedSpan) {
+	processorStats, streamStats := extractStatsFromSpans(d.flowID, spans, d.flags)
 	for i := range d.Processors {
 		if statDetails, ok := processorStats[int(d.Processors[i].processorID)]; ok {
 			d.Processors[i].Core.Details = append(d.Processors[i].Core.Details, statDetails...)
@@ -591,11 +606,12 @@ func (d *diagramData) AddSpans(spans []tracing.RecordedSpan) {
 }
 
 func generateDiagramData(
-	sql string, flows []FlowSpec, nodeNames []string, showInputTypes bool,
+	sql string, flows []FlowSpec, nodeNames []string, flags DiagramFlags,
 ) (FlowDiagram, error) {
 	d := &diagramData{
 		SQL:       sql,
 		NodeNames: nodeNames,
+		flags:     flags,
 	}
 	if len(flows) > 0 {
 		d.flowID = flows[0].FlowID
@@ -625,7 +641,7 @@ func generateDiagramData(
 			if len(p.Input) > 1 || (len(p.Input) == 1 && len(p.Input[0].Streams) > 1) {
 				proc.Inputs = make([]diagramCell, len(p.Input))
 				for i, s := range p.Input {
-					proc.Inputs[i].Title, proc.Inputs[i].Details = s.summary(showInputTypes)
+					proc.Inputs[i].Title, proc.Inputs[i].Details = s.summary(flags.ShowInputTypes)
 				}
 			} else {
 				proc.Inputs = []diagramCell{}
@@ -723,7 +739,7 @@ func generateDiagramData(
 // one FlowSpec per node. The function assumes that StreamIDs are unique across
 // all flows.
 func GeneratePlanDiagram(
-	sql string, flows map[roachpb.NodeID]*FlowSpec, showInputTypes bool,
+	sql string, flows map[roachpb.NodeID]*FlowSpec, flags DiagramFlags,
 ) (FlowDiagram, error) {
 	// We sort the flows by node because we want the diagram data to be
 	// deterministic.
@@ -741,16 +757,16 @@ func GeneratePlanDiagram(
 		nodeNames[i] = n.String()
 	}
 
-	return generateDiagramData(sql, flowSlice, nodeNames, showInputTypes)
+	return generateDiagramData(sql, flowSlice, nodeNames, flags)
 }
 
 // GeneratePlanDiagramURL generates the json data for a flow diagram and a
 // URL which encodes the diagram. There should be one FlowSpec per node. The
 // function assumes that StreamIDs are unique across all flows.
 func GeneratePlanDiagramURL(
-	sql string, flows map[roachpb.NodeID]*FlowSpec, showInputTypes bool,
+	sql string, flows map[roachpb.NodeID]*FlowSpec, flags DiagramFlags,
 ) (string, url.URL, error) {
-	d, err := GeneratePlanDiagram(sql, flows, showInputTypes)
+	d, err := GeneratePlanDiagram(sql, flows, flags)
 	if err != nil {
 		return "", url.URL{}, err
 	}
@@ -785,7 +801,7 @@ func encodeJSONToURL(json bytes.Buffer) (string, url.URL, error) {
 // and returns a map from that processor id to a slice of stat descriptions
 // that can be added to a plan.
 func extractStatsFromSpans(
-	flowID FlowID, spans []tracing.RecordedSpan,
+	flowID FlowID, spans []tracingpb.RecordedSpan, flags DiagramFlags,
 ) (processorStats, streamStats map[int][]string) {
 	processorStats = make(map[int][]string)
 	streamStats = make(map[int][]string)
@@ -810,18 +826,23 @@ func extractStatsFromSpans(
 		} else {
 			continue
 		}
-
-		var da types.DynamicAny
-		if err := types.UnmarshalAny(span.Stats, &da); err != nil {
+		i, err := strconv.Atoi(id)
+		if err != nil {
 			continue
 		}
-		if dss, ok := da.Message.(DistSQLSpanStats); ok {
-			i, err := strconv.Atoi(id)
-			if err != nil {
-				continue
-			}
-			stats[i] = append(stats[i], dss.StatsForQueryPlan()...)
+
+		if span.Stats == nil {
+			continue
 		}
+
+		var compStats ComponentStats
+		if err := types.UnmarshalAny(span.Stats, &compStats); err != nil {
+			continue
+		}
+		if flags.MakeDeterministic {
+			compStats.MakeDeterministic()
+		}
+		stats[i] = append(stats[i], compStats.StatsForQueryPlan()...)
 	}
 	return processorStats, streamStats
 }

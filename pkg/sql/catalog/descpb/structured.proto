@@ -113,8 +113,8 @@ message ColumnDescriptor {
   // Default expression to use to populate the column on insert if no
   // value is provided. Note that it is not correct to use DefaultExpr
   // as output to display to a user. User defined types within DefaultExpr
-  // have been serialized in a internal format. Instead, format the result
-  // of DeserializeTableDescExpr.
+  // have been serialized in a internal format. Instead, use one of the
+  // schemaexpr.FormatExpr* functions.
   optional string default_expr = 5;
   reserved 9;
   optional bool hidden = 6 [(gogoproto.nullable) = false];
@@ -126,8 +126,8 @@ message ColumnDescriptor {
   // Expression to use to compute the value of this column if this is a
   // computed column. Note that it is not correct to use ComputeExpr
   // as output to display to a user. User defined types within ComputeExpr
-  // have been serialized in a internal format. Instead, format the result
-  // of DeserializeTableDescExpr.
+  // have been serialized in a internal format. Instead, use one of the
+  // schemaexpr.FormatExpr* functions.
   optional string compute_expr = 11;
   // PGAttributeNum must be accessed through the accessor, since it is set
   // lazily, it is incorrect to access it directly.
@@ -152,6 +152,8 @@ enum SystemColumnKind {
   // A system column containing the value of the MVCC timestamp associated
   // with the kv's corresponding to the row.
   MVCCTIMESTAMP = 1;
+  // A system column containing the OID of the table that the row came from.
+  TABLEOID = 2;
 }
 
 // ColumnFamilyDescriptor is set of columns stored together in one kv entry.
@@ -371,7 +373,9 @@ message IndexDescriptor {
 
   // An ordered list of column names of which the index is comprised; these
   // columns do not include any additional stored columns (which are in
-  // stored_column_names). This list parallels the column_ids list.
+  // stored_column_names). This list parallels the column_ids list. If the index
+  // is an inverted index, the last column in the list is inverted and all
+  // others are not.
   //
   // Note: if duplicating the storage of the column names here proves to be
   // prohibitive, we could clear this field before saving and reconstruct it
@@ -388,7 +392,8 @@ message IndexDescriptor {
 
   // An ordered list of column IDs of which the index is comprised. This list
   // parallels the column_names list and does not include any additional stored
-  // columns.
+  // columns. If the index is an inverted index, the last column in the list is
+  // inverted and all others are not.
   repeated uint32 column_ids = 6 [(gogoproto.customname) = "ColumnIDs",
       (gogoproto.casttype) = "ColumnID"];
 
@@ -551,6 +556,11 @@ message MaterializedViewRefresh {
   repeated IndexDescriptor new_indexes = 2 [(gogoproto.nullable) = false];
   // AsOf is the timestamp to perform the view query at.
   optional util.hlc.Timestamp as_of = 3 [(gogoproto.nullable) = false];
+  // ShouldBackfill indicates whether or not the schema changer should backfill
+  // the query into the new indexes. This can be false if the `WITH NO DATA` flag
+  // was specified for the `REFRESH MATERIALIZED VIEW` statement. `WITH NO DATA`
+  // indicates that the user just wants the space used by the view to be reclaimed.
+  optional bool should_backfill = 4 [(gogoproto.nullable) = false];
 }
 
 // A DescriptorMutation represents a column or an index that
@@ -707,6 +717,23 @@ message NameInfo {
   optional string name = 2 [(gogoproto.nullable) = false];
 }
 
+// State indicates whether a descriptor is public (i.e., normally visible,
+// resolvable, etc.) or in some other state subject to restrictions.
+// A non-public table descriptor cannot be leased.
+// A schema changer observing DROP set will truncate the table and delete the
+// descriptor.
+// It is illegal to transition DROP to any other state.
+enum DescriptorState {
+  // Descriptor is visible and can be leased.
+  PUBLIC = 0;
+  // Descriptor is being added.
+  ADD = 1;
+  // Descriptor is being dropped.
+  DROP = 2;
+  // Descriptor is offline (e.g. for bulk-ingestion). See offline_reason.
+  OFFLINE = 3;
+}
+
 // A TableDescriptor represents a table or view and is stored in a
 // structured metadata key. The TableDescriptor has a globally-unique ID,
 // while its member {Column,Index}Descriptors have locally-unique IDs.
@@ -819,22 +846,7 @@ message TableDescriptor {
 
   reserved 18;
 
-  // State is set if this TableDescriptor is in the process of being added or deleted.
-  // A non-public table descriptor cannot be leased.
-  // A schema changer observing DROP set will truncate the table and delete the
-  // descriptor.
-  // It is illegal to transition DROP to any other state.
-  enum State {
-    // Not used.
-    PUBLIC = 0;
-    // Descriptor is being added.
-    ADD = 1;
-    // Descriptor is being dropped.
-    DROP = 2;
-    // Descriptor is offline (e.g. for bulk-ingestion). See offline_reason.
-    OFFLINE = 3;
-  }
-  optional State state = 19 [(gogoproto.nullable) = false];
+  optional DescriptorState state = 19 [(gogoproto.nullable) = false];
   optional string offline_reason = 38 [(gogoproto.nullable) = false];
 
   message CheckConstraint {
@@ -842,8 +854,8 @@ message TableDescriptor {
     // Expr is the expression that this check constraint represents.
     // Note that it is not correct to use Expr as output to display
     // to a user. User defined types within Expr have been serialized
-    // in a internal format. Instead, format the result of
-    // DeserializeTableDescExpr.
+    // in a internal format. Instead, use one of the schemaexpr.FormatExpr*
+    // functions.
     optional string expr = 1 [(gogoproto.nullable) = false];
     optional string name = 2 [(gogoproto.nullable) = false];
     optional ConstraintValidity validity = 3 [(gogoproto.nullable) = false];
@@ -1038,6 +1050,14 @@ message TableDescriptor {
   optional bool temporary = 39 [(gogoproto.nullable) = false];
 }
 
+// SurvivalGoal is the survival goal for a database.
+enum SurvivalGoal {
+  // Survive a zone failure. This is the default.
+  ZONE_FAILURE = 0;
+  // Survive a region failure.
+  REGION_FAILURE = 1;
+}
+
 // DatabaseDescriptor represents a namespace (aka database) and is stored
 // in a structured metadata key. The DatabaseDescriptor has a globally-unique ID
 // shared with other Descriptors.
@@ -1073,6 +1093,25 @@ message DatabaseDescriptor {
   // name resolution to know without a KV lookup whether a database has a
   // child schema with a target name. Temporary schemas are not stored here.
   map<string, SchemaInfo> schemas = 7 [(gogoproto.nullable) = false];
+
+  optional DescriptorState state = 8 [(gogoproto.nullable) = false];
+  optional string offline_reason = 9 [(gogoproto.nullable) = false];
+
+  // RegionConfig stores region configuration for a given database.
+  message RegionConfig {
+    option (gogoproto.equal) = true;
+
+    repeated string regions = 1 [(gogoproto.casttype)="Region"];
+    optional SurvivalGoal survival_goal = 2 [(gogoproto.nullable)=false];
+    optional string primary_region = 3 [(gogoproto.nullable)=false,(gogoproto.casttype)="Region"];
+
+    // RegionEnumID represents ID of the type descriptor corresponding to the
+    // region enum for a multi-region database. If the database is not a
+    // multi-region database then this field is 0 and no such region enum exists.
+    optional uint32 region_enum_id = 4 [(gogoproto.nullable) = false, (gogoproto.customname) = "RegionEnumID", (gogoproto.casttype) = "ID"];
+  }
+  // RegionConfig is only set if multi-region controls are set on the database.
+  optional RegionConfig region_config = 10;
 }
 
 // TypeDescriptor represents a user defined type and is stored in a structured
@@ -1097,6 +1136,8 @@ message TypeDescriptor {
   optional util.hlc.Timestamp modification_time = 10 [(gogoproto.nullable) = false];
   repeated NameInfo draining_names = 11 [(gogoproto.nullable) = false];
 
+  // privileges contains the privileges for the type.
+  optional PrivilegeDescriptor privileges = 14;
 
   // Fields that are shared among all kinds of user defined types.
 
@@ -1114,12 +1155,8 @@ message TypeDescriptor {
   optional uint32 array_type_id = 8
     [(gogoproto.nullable) = false, (gogoproto.customname) = "ArrayTypeID", (gogoproto.casttype) = "ID"];
 
-  // State is set if this TypeDescriptor is in the process of being deleted.
-  enum State {
-    PUBLIC = 0;
-    DROP = 1;
-  }
-  optional State state = 13 [(gogoproto.nullable) = false];
+  optional DescriptorState state = 13 [(gogoproto.nullable) = false];
+  optional string offline_reason = 15 [(gogoproto.nullable) = false];
 
   // Represents the kind of type that this type descriptor represents.
   enum Kind {
@@ -1128,6 +1165,9 @@ message TypeDescriptor {
     // Represents a user defined type that is just an alias for another type.
     // As of now, it is used only internally.
     ALIAS = 1;
+    // Represents a special multi-region enum type which tracks available regions
+    // as its enum values.
+    MULTIREGION_ENUM = 2;
     // Add more entries as we support more user defined types.
   }
   optional Kind kind = 5 [(gogoproto.nullable) = false];
@@ -1136,7 +1176,8 @@ message TypeDescriptor {
   repeated uint32 referencing_descriptor_ids = 12
     [(gogoproto.casttype) = "ID", (gogoproto.customname) = "ReferencingDescriptorIDs"];
 
-  // The fields below are used only when this type is an ENUM type.
+  // The fields below are used only when this type is an ENUM or a
+  // MULTIREGION_ENUM.
 
   // EnumMember represents a value in an enum.
   message EnumMember {
@@ -1158,11 +1199,24 @@ message TypeDescriptor {
   // enum_members is the set of values in an enum.
   repeated EnumMember enum_members = 6 [(gogoproto.nullable) = false];
 
-  // The fields below are used only when this type is an ALIAS type.
+  // The fields below are used only when this type is an ALIAS.
 
   // alias is the types.T that this descriptor is an alias for.
   optional sql.sem.types.T alias = 7;
 
+
+  // The fields below are used only when this type is a MULTIREGION_ENUM.
+
+  // RegionConfig stores the multi-region configuration for a type descriptor of
+  // MULTIREGION_ENUM kind.
+  message RegionConfig {
+    option (gogoproto.equal) = true;
+
+    // PrimaryRegion represents the PrimaryRegion for a multi-region enum.
+    optional string primary_region = 1 [(gogoproto.nullable) = false, (gogoproto.casttype)="Region"];
+  }
+
+  optional RegionConfig region_config = 16;
 }
 
 // SchemaDescriptor represents a physical schema and is stored in a structured
@@ -1180,6 +1234,9 @@ message SchemaDescriptor {
   // id is the schema ID, globally unique across all descriptors.
   optional uint32 id = 3
   [(gogoproto.nullable) = false, (gogoproto.customname) = "ID", (gogoproto.casttype) = "ID"];
+
+  optional DescriptorState state = 8 [(gogoproto.nullable) = false];
+  optional string offline_reason = 9 [(gogoproto.nullable) = false];
 
   // Last modification time of the descriptor.
   optional util.hlc.Timestamp modification_time = 5 [(gogoproto.nullable) = false];

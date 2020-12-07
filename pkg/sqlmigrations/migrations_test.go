@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -26,9 +27,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/sqlmigrations/leasemanager"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -38,7 +41,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/proto"
 	"github.com/stretchr/testify/require"
 )
 
@@ -425,7 +427,7 @@ func TestLeaseExpiration(t *testing.T) {
 	defer func() { leaseRefreshInterval = oldLeaseRefreshInterval }()
 
 	exitCalled := make(chan bool)
-	log.SetExitFunc(true /* hideStack */, func(int) { exitCalled <- true })
+	log.SetExitFunc(true /* hideStack */, func(exit.Code) { exitCalled <- true })
 	defer log.ResetExitFunc()
 	// Disable stack traces to make the test output in teamcity less deceiving.
 	defer log.DisableTracebacks()()
@@ -543,7 +545,7 @@ func TestCreateSystemTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ctx := context.Background()
 
-	table := sqlbase.NewMutableExistingTableDescriptor(sqlbase.NamespaceTable.TableDescriptor)
+	table := tabledesc.NewExistingMutable(systemschema.NamespaceTable.TableDescriptor)
 	table.ID = keys.MaxReservedDescID
 
 	prevPrivileges, ok := descpb.SystemAllowedPrivileges[table.ID]
@@ -558,8 +560,8 @@ func TestCreateSystemTable(t *testing.T) {
 	descpb.SystemAllowedPrivileges[table.ID] = descpb.SystemAllowedPrivileges[keys.NamespaceTableID]
 
 	table.Name = "dummy"
-	nameKey := sqlbase.NewPublicTableKey(table.ParentID, table.Name).Key(keys.SystemSQLCodec)
-	descKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, table.ID)
+	nameKey := catalogkeys.NewPublicTableKey(table.ParentID, table.Name).Key(keys.SystemSQLCodec)
+	descKey := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, table.ID)
 	descVal := table.DescriptorProto()
 
 	mt := makeMigrationTest(ctx, t)
@@ -598,7 +600,7 @@ func TestCreateSystemTable(t *testing.T) {
 	var descriptor descpb.Descriptor
 	if err := mt.kvDB.GetProto(ctx, descKey, &descriptor); err != nil {
 		t.Error(err)
-	} else if !proto.Equal(descVal, &descriptor) {
+	} else if !descVal.Equal(&descriptor) {
 		t.Errorf("expected %v for key %q, got %v", descVal, descKey, descriptor)
 	}
 
@@ -777,10 +779,10 @@ func TestMigrateNamespaceTableDescriptors(t *testing.T) {
 
 	// Since we're already on 20.1, mimic the beginning state by deleting the
 	// new namespace descriptor.
-	key := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, keys.NamespaceTableID)
+	key := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, keys.NamespaceTableID)
 	require.NoError(t, mt.kvDB.Del(ctx, key))
 
-	deprecatedKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, keys.DeprecatedNamespaceTableID)
+	deprecatedKey := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, keys.DeprecatedNamespaceTableID)
 	desc := &descpb.Descriptor{}
 	require.NoError(t, mt.kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		_, err := txn.GetProtoTs(ctx, deprecatedKey, desc)
@@ -796,18 +798,18 @@ func TestMigrateNamespaceTableDescriptors(t *testing.T) {
 		{
 			ts, err := txn.GetProtoTs(ctx, key, desc)
 			require.NoError(t, err)
-			table := sqlbase.TableFromDescriptor(desc, ts)
-			table.CreateAsOfTime = sqlbase.NamespaceTable.CreateAsOfTime
-			table.ModificationTime = sqlbase.NamespaceTable.ModificationTime
-			require.True(t, table.Equal(sqlbase.NamespaceTable.TableDesc()))
+			table := descpb.TableFromDescriptor(desc, ts)
+			table.CreateAsOfTime = systemschema.NamespaceTable.CreateAsOfTime
+			table.ModificationTime = systemschema.NamespaceTable.ModificationTime
+			require.True(t, table.Equal(systemschema.NamespaceTable.TableDesc()))
 		}
 		{
 			ts, err := txn.GetProtoTs(ctx, deprecatedKey, desc)
 			require.NoError(t, err)
-			table := sqlbase.TableFromDescriptor(desc, ts)
-			table.CreateAsOfTime = sqlbase.DeprecatedNamespaceTable.CreateAsOfTime
-			table.ModificationTime = sqlbase.DeprecatedNamespaceTable.ModificationTime
-			require.True(t, table.Equal(sqlbase.DeprecatedNamespaceTable.TableDesc()))
+			table := descpb.TableFromDescriptor(desc, ts)
+			table.CreateAsOfTime = systemschema.DeprecatedNamespaceTable.CreateAsOfTime
+			table.ModificationTime = systemschema.DeprecatedNamespaceTable.ModificationTime
+			require.True(t, table.Equal(systemschema.DeprecatedNamespaceTable.TableDesc()))
 		}
 		return nil
 	}))
@@ -838,7 +840,7 @@ CREATE TABLE system.jobs (
 		keys.SystemDatabaseID,
 		keys.JobsTableID,
 		oldJobsTableSchema,
-		sqlbase.JobsTable.Privileges,
+		systemschema.JobsTable.Privileges,
 	)
 	require.NoError(t, err)
 
@@ -853,10 +855,10 @@ CREATE TABLE system.jobs (
 	require.Equal(t, primaryFamilyName, oldJobsTable.Families[0].Name)
 	require.Equal(t, oldPrimaryFamilyColumns, oldJobsTable.Families[0].ColumnNames)
 
-	jobsTable := sqlbase.JobsTable
-	sqlbase.JobsTable = sqlbase.NewImmutableTableDescriptor(*oldJobsTable.TableDesc())
+	jobsTable := systemschema.JobsTable
+	systemschema.JobsTable = tabledesc.NewImmutable(*oldJobsTable.TableDesc())
 	defer func() {
-		sqlbase.JobsTable = jobsTable
+		systemschema.JobsTable = jobsTable
 	}()
 
 	mt := makeMigrationTest(ctx, t)
@@ -891,7 +893,7 @@ CREATE TABLE system.jobs (
 	require.NoError(t, mt.runMigration(ctx, migration))
 	newJobsTableAgain := catalogkv.TestingGetTableDescriptor(
 		mt.kvDB, keys.SystemSQLCodec, "system", "jobs")
-	require.True(t, proto.Equal(newJobsTable.TableDesc(), newJobsTableAgain.TableDesc()))
+	require.True(t, newJobsTable.TableDesc().Equal(newJobsTableAgain.TableDesc()))
 }
 
 func TestVersionAlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable(t *testing.T) {
@@ -923,7 +925,7 @@ func TestVersionAlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable
 		keys.SystemDatabaseID,
 		keys.JobsTableID,
 		oldJobsTableSchema,
-		sqlbase.JobsTable.Privileges,
+		systemschema.JobsTable.Privileges,
 	)
 	require.NoError(t, err)
 
@@ -934,10 +936,10 @@ func TestVersionAlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable
 	require.Equal(t, 2, len(oldJobsTable.Families))
 	require.Equal(t, oldPrimaryFamilyColumns, oldJobsTable.Families[0].ColumnNames)
 
-	jobsTable := sqlbase.JobsTable
-	sqlbase.JobsTable = sqlbase.NewImmutableTableDescriptor(*oldJobsTable.TableDesc())
+	jobsTable := systemschema.JobsTable
+	systemschema.JobsTable = tabledesc.NewImmutable(*oldJobsTable.TableDesc())
 	defer func() {
-		sqlbase.JobsTable = jobsTable
+		systemschema.JobsTable = jobsTable
 	}()
 
 	mt := makeMigrationTest(ctx, t)

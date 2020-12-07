@@ -17,9 +17,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -28,7 +30,7 @@ import (
 type Inserter struct {
 	Helper                rowHelper
 	InsertCols            []descpb.ColumnDescriptor
-	InsertColIDtoRowIndex map[descpb.ColumnID]int
+	InsertColIDtoRowIndex catalog.TableColMap
 
 	// For allocation avoidance.
 	marshaled []roachpb.Value
@@ -44,9 +46,9 @@ func MakeInserter(
 	ctx context.Context,
 	txn *kv.Txn,
 	codec keys.SQLCodec,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	insertCols []descpb.ColumnDescriptor,
-	alloc *sqlbase.DatumAlloc,
+	alloc *rowenc.DatumAlloc,
 ) (Inserter, error) {
 	ri := Inserter{
 		Helper:                newRowHelper(codec, tableDesc, tableDesc.WritableIndexes()),
@@ -56,7 +58,7 @@ func MakeInserter(
 	}
 
 	for i, col := range tableDesc.PrimaryIndex.ColumnIDs {
-		if _, ok := ri.InsertColIDtoRowIndex[col]; !ok {
+		if _, ok := ri.InsertColIDtoRowIndex.Get(col); !ok {
 			return Inserter{}, fmt.Errorf("missing %q primary key column", tableDesc.PrimaryIndex.ColumnNames[i])
 		}
 	}
@@ -137,7 +139,7 @@ func (ri *Inserter) InsertRow(
 	for i, val := range values {
 		// Make sure the value can be written to the column before proceeding.
 		var err error
-		if ri.marshaled[i], err = sqlbase.MarshalColumnValue(&ri.InsertCols[i], val); err != nil {
+		if ri.marshaled[i], err = rowenc.MarshalColumnValue(&ri.InsertCols[i], val); err != nil {
 			return err
 		}
 	}

@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -134,7 +133,7 @@ func TestEncodings(t *testing.T) {
 		return data
 	}
 
-	var conv sessiondata.DataConversionConfig
+	conv, loc := makeTestingConvCfg()
 	ctx := context.Background()
 	evalCtx := tree.MakeTestingEvalContext(nil)
 	t.Run("encode", func(t *testing.T) {
@@ -144,7 +143,7 @@ func TestEncodings(t *testing.T) {
 
 				buf.reset()
 				buf.textFormatter.Buffer.Reset()
-				buf.writeTextDatum(ctx, d, conv, tc.T)
+				buf.writeTextDatum(ctx, d, conv, loc, tc.T)
 				if buf.err != nil {
 					t.Fatal(buf.err)
 				}
@@ -183,7 +182,12 @@ func TestEncodings(t *testing.T) {
 				pgwirebase.FormatText:   tc.TextAsBinary,
 				pgwirebase.FormatBinary: tc.Binary,
 			} {
-				d, err := pgwirebase.DecodeOidDatum(nil, tc.Oid, code, value)
+				d, err := pgwirebase.DecodeDatum(
+					&evalCtx,
+					types.OidToType[tc.Oid],
+					code,
+					value,
+				)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -241,7 +245,12 @@ func TestExoticNumericEncodings(t *testing.T) {
 	evalCtx := tree.MakeTestingEvalContext(nil)
 	for i, c := range testCases {
 		t.Run(fmt.Sprintf("%d_%s", i, c.Value), func(t *testing.T) {
-			d, err := pgwirebase.DecodeOidDatum(nil, oid.T_numeric, pgwirebase.FormatBinary, c.Encoding)
+			d, err := pgwirebase.DecodeDatum(
+				&evalCtx,
+				types.Decimal,
+				pgwirebase.FormatBinary,
+				c.Encoding,
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -257,7 +266,7 @@ func TestExoticNumericEncodings(t *testing.T) {
 func BenchmarkEncodings(b *testing.B) {
 	tests := readEncodingTests(b)
 	buf := newWriteBuffer(metric.NewCounter(metric.Metadata{}))
-	var conv sessiondata.DataConversionConfig
+	conv, loc := makeTestingConvCfg()
 	ctx := context.Background()
 
 	for _, tc := range tests {
@@ -268,7 +277,7 @@ func BenchmarkEncodings(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					buf.reset()
 					buf.textFormatter.Buffer.Reset()
-					buf.writeTextDatum(ctx, d, conv, tc.T)
+					buf.writeTextDatum(ctx, d, conv, loc, tc.T)
 				}
 			})
 			b.Run("binary", func(b *testing.B) {

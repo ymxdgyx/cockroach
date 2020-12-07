@@ -12,7 +12,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
@@ -20,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 type caseOp struct {
@@ -46,7 +46,7 @@ type caseOp struct {
 	prevSel []int
 }
 
-var _ InternalMemoryOperator = &caseOp{}
+var _ colexecbase.Operator = &caseOp{}
 
 func (c *caseOp) ChildCount(verbose bool) int {
 	return 1 + len(c.caseOps) + 1
@@ -60,14 +60,9 @@ func (c *caseOp) Child(nth int, verbose bool) execinfra.OpNode {
 	} else if nth == 1+len(c.caseOps) {
 		return c.elseOp
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid idx %d", nth))
+	colexecerror.InternalError(errors.AssertionFailedf("invalid idx %d", nth))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
-}
-
-func (c *caseOp) InternalMemoryUsage() int {
-	// We internally use two selection vectors, origSel and prevSel.
-	return 2 * colmem.SizeOfBatchSizeSelVector
 }
 
 // NewCaseOp returns an operator that runs a case statement.
@@ -89,6 +84,8 @@ func NewCaseOp(
 	outputIdx int,
 	typ *types.T,
 ) colexecbase.Operator {
+	// We internally use two selection vectors, origSel and prevSel.
+	allocator.AdjustMemoryUsage(int64(2 * colmem.SizeOfBatchSizeSelVector))
 	return &caseOp{
 		allocator: allocator,
 		buffer:    buffer.(*bufferOp),

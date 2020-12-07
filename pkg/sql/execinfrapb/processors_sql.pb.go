@@ -64,7 +64,7 @@ func (x *ScanVisibility) UnmarshalJSON(data []byte) error {
 	return nil
 }
 func (ScanVisibility) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{0}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{0}
 }
 
 // These mirror the aggregate functions supported by sql/parser. See
@@ -104,6 +104,19 @@ const (
 	AggregatorSpec_VAR_POP              AggregatorSpec_Func = 29
 	AggregatorSpec_STDDEV_POP           AggregatorSpec_Func = 30
 	AggregatorSpec_ST_MAKELINE          AggregatorSpec_Func = 31
+	AggregatorSpec_ST_EXTENT            AggregatorSpec_Func = 32
+	AggregatorSpec_ST_UNION             AggregatorSpec_Func = 33
+	AggregatorSpec_ST_COLLECT           AggregatorSpec_Func = 34
+	AggregatorSpec_COVAR_POP            AggregatorSpec_Func = 35
+	AggregatorSpec_COVAR_SAMP           AggregatorSpec_Func = 36
+	AggregatorSpec_REGR_INTERCEPT       AggregatorSpec_Func = 37
+	AggregatorSpec_REGR_R2              AggregatorSpec_Func = 38
+	AggregatorSpec_REGR_SLOPE           AggregatorSpec_Func = 39
+	AggregatorSpec_REGR_SXX             AggregatorSpec_Func = 40
+	AggregatorSpec_REGR_SYY             AggregatorSpec_Func = 41
+	AggregatorSpec_REGR_SXY             AggregatorSpec_Func = 42
+	AggregatorSpec_REGR_COUNT           AggregatorSpec_Func = 43
+	AggregatorSpec_REGR_AVGX            AggregatorSpec_Func = 44
 )
 
 var AggregatorSpec_Func_name = map[int32]string{
@@ -138,6 +151,19 @@ var AggregatorSpec_Func_name = map[int32]string{
 	29: "VAR_POP",
 	30: "STDDEV_POP",
 	31: "ST_MAKELINE",
+	32: "ST_EXTENT",
+	33: "ST_UNION",
+	34: "ST_COLLECT",
+	35: "COVAR_POP",
+	36: "COVAR_SAMP",
+	37: "REGR_INTERCEPT",
+	38: "REGR_R2",
+	39: "REGR_SLOPE",
+	40: "REGR_SXX",
+	41: "REGR_SYY",
+	42: "REGR_SXY",
+	43: "REGR_COUNT",
+	44: "REGR_AVGX",
 }
 var AggregatorSpec_Func_value = map[string]int32{
 	"ANY_NOT_NULL":         0,
@@ -171,6 +197,19 @@ var AggregatorSpec_Func_value = map[string]int32{
 	"VAR_POP":              29,
 	"STDDEV_POP":           30,
 	"ST_MAKELINE":          31,
+	"ST_EXTENT":            32,
+	"ST_UNION":             33,
+	"ST_COLLECT":           34,
+	"COVAR_POP":            35,
+	"COVAR_SAMP":           36,
+	"REGR_INTERCEPT":       37,
+	"REGR_R2":              38,
+	"REGR_SLOPE":           39,
+	"REGR_SXX":             40,
+	"REGR_SYY":             41,
+	"REGR_SXY":             42,
+	"REGR_COUNT":           43,
+	"REGR_AVGX":            44,
 }
 
 func (x AggregatorSpec_Func) Enum() *AggregatorSpec_Func {
@@ -190,7 +229,7 @@ func (x *AggregatorSpec_Func) UnmarshalJSON(data []byte) error {
 	return nil
 }
 func (AggregatorSpec_Func) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{12, 0}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{13, 0}
 }
 
 type AggregatorSpec_Type int32
@@ -236,7 +275,7 @@ func (x *AggregatorSpec_Type) UnmarshalJSON(data []byte) error {
 	return nil
 }
 func (AggregatorSpec_Type) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{12, 1}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{13, 1}
 }
 
 type WindowerSpec_WindowFunc int32
@@ -300,7 +339,7 @@ func (x *WindowerSpec_WindowFunc) UnmarshalJSON(data []byte) error {
 	return nil
 }
 func (WindowerSpec_WindowFunc) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15, 0}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15, 0}
 }
 
 // Mode indicates which mode of framing is used.
@@ -344,7 +383,7 @@ func (x *WindowerSpec_Frame_Mode) UnmarshalJSON(data []byte) error {
 	return nil
 }
 func (WindowerSpec_Frame_Mode) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15, 1, 0}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15, 1, 0}
 }
 
 // BoundType indicates which type of boundary is used.
@@ -391,7 +430,7 @@ func (x *WindowerSpec_Frame_BoundType) UnmarshalJSON(data []byte) error {
 	return nil
 }
 func (WindowerSpec_Frame_BoundType) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15, 1, 1}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15, 1, 1}
 }
 
 // Exclusion specifies the type of frame exclusion.
@@ -434,7 +473,7 @@ func (x *WindowerSpec_Frame_Exclusion) UnmarshalJSON(data []byte) error {
 	return nil
 }
 func (WindowerSpec_Frame_Exclusion) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15, 1, 2}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15, 1, 2}
 }
 
 // ValuesCoreSpec is the core of a processor that has no inputs and generates
@@ -454,7 +493,7 @@ func (m *ValuesCoreSpec) Reset()         { *m = ValuesCoreSpec{} }
 func (m *ValuesCoreSpec) String() string { return proto.CompactTextString(m) }
 func (*ValuesCoreSpec) ProtoMessage()    {}
 func (*ValuesCoreSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{0}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{0}
 }
 func (m *ValuesCoreSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -484,10 +523,9 @@ var xxx_messageInfo_ValuesCoreSpec proto.InternalMessageInfo
 // columns of the rows that pass a filter expression.
 //
 // The "internal columns" of a TableReader (see ProcessorSpec) are all the
-// columns of the table. Internally, only the values for the columns needed by
-// the post-processing stage are to be populated. If is_check is set, the
-// TableReader will run additional data checking procedures and the
-// "internal columns" are:
+// columns of the table. Internally, only the values for the columns specified
+// by needed_columns are to be populated. If is_check is set, the TableReader
+// will run additional data checking procedures and the "internal columns" are:
 //  - Error type (string).
 //  - Primary key as a string, if it was obtainable.
 //  - JSON of all decoded column values.
@@ -548,24 +586,24 @@ type TableReaderSpec struct {
 	// Indicates the row-level locking strength to be used by the scan. If set to
 	// FOR_NONE, no row-level locking should be performed.
 	LockingStrength descpb.ScanLockingStrength `protobuf:"varint,10,opt,name=locking_strength,json=lockingStrength,enum=cockroach.sql.sqlbase.ScanLockingStrength" json:"locking_strength"`
-	// Indicates the policy to be used by the scan when dealing with rows being
-	// locked. Always set to BLOCK when locking_stength is FOR_NONE.
-	//
-	// NOTE: this is currently set but unused because only the BLOCK wait policy
-	// makes it out of the SQL optimizer without throwing an error. If/when other
-	// wait policies are supported, this field will be plumbed further.
+	// Indicates the policy to be used by the scan for handling conflicting locks
+	// held by other active transactions when attempting to lock rows. Always set
+	// to BLOCK when locking_stength is FOR_NONE.
 	LockingWaitPolicy descpb.ScanLockingWaitPolicy `protobuf:"varint,11,opt,name=locking_wait_policy,json=lockingWaitPolicy,enum=cockroach.sql.sqlbase.ScanLockingWaitPolicy" json:"locking_wait_policy"`
-	// Indicates what implicit system columns this TableReader is expected to
-	// synthesize. These system columns will be placed at the end of the row
-	// output by the TableReader, in the order specified.
-	SystemColumns []descpb.SystemColumnKind `protobuf:"varint,13,rep,name=system_columns,json=systemColumns,enum=cockroach.sql.sqlbase.SystemColumnKind" json:"system_columns,omitempty"`
+	// Indicates whether or not this TableReader is expected to produce any
+	// system columns in its output.
+	HasSystemColumns bool `protobuf:"varint,14,opt,name=has_system_columns,json=hasSystemColumns" json:"has_system_columns"`
+	// Indicates the ordinals of the columns values for which are needed by the
+	// post-processing stage and, therefore, are to be populated. It is ignored
+	// if is_check is true.
+	NeededColumns []uint32 `protobuf:"varint,15,rep,name=needed_columns,json=neededColumns" json:"needed_columns,omitempty"`
 }
 
 func (m *TableReaderSpec) Reset()         { *m = TableReaderSpec{} }
 func (m *TableReaderSpec) String() string { return proto.CompactTextString(m) }
 func (*TableReaderSpec) ProtoMessage()    {}
 func (*TableReaderSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{1}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{1}
 }
 func (m *TableReaderSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -590,6 +628,43 @@ func (m *TableReaderSpec) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_TableReaderSpec proto.InternalMessageInfo
 
+// FiltererSpec is the specification for a processor that filters input rows
+// according to a boolean expression.
+type FiltererSpec struct {
+	// A filtering expression which references the internal columns of the
+	// processor via ordinal references (@1, @2, etc).
+	Filter Expression `protobuf:"bytes,1,opt,name=filter" json:"filter"`
+}
+
+func (m *FiltererSpec) Reset()         { *m = FiltererSpec{} }
+func (m *FiltererSpec) String() string { return proto.CompactTextString(m) }
+func (*FiltererSpec) ProtoMessage()    {}
+func (*FiltererSpec) Descriptor() ([]byte, []int) {
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{2}
+}
+func (m *FiltererSpec) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *FiltererSpec) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *FiltererSpec) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_FiltererSpec.Merge(dst, src)
+}
+func (m *FiltererSpec) XXX_Size() int {
+	return m.Size()
+}
+func (m *FiltererSpec) XXX_DiscardUnknown() {
+	xxx_messageInfo_FiltererSpec.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_FiltererSpec proto.InternalMessageInfo
+
 // IndexSkipTableReaderSpec is the specification for a table reader that
 // is performing a loose index scan over rows in the table. This means that
 // this reader will return distinct rows from the table while using the index
@@ -610,12 +685,9 @@ type IndexSkipTableReaderSpec struct {
 	// Indicates the row-level locking strength to be used by the scan. If set to
 	// FOR_NONE, no row-level locking should be performed.
 	LockingStrength descpb.ScanLockingStrength `protobuf:"varint,6,opt,name=locking_strength,json=lockingStrength,enum=cockroach.sql.sqlbase.ScanLockingStrength" json:"locking_strength"`
-	// Indicates the policy to be used by the scan when dealing with rows being
-	// locked. Always set to BLOCK when locking_stength is FOR_NONE.
-	//
-	// NOTE: this is currently set but unused because only the BLOCK wait policy
-	// makes it out of the SQL optimizer without throwing an error. If/when other
-	// wait policies are supported, this field will be plumbed further.
+	// Indicates the policy to be used by the scan for handling conflicting locks
+	// held by other active transactions when attempting to lock rows. Always set
+	// to BLOCK when locking_stength is FOR_NONE.
 	LockingWaitPolicy descpb.ScanLockingWaitPolicy `protobuf:"varint,7,opt,name=locking_wait_policy,json=lockingWaitPolicy,enum=cockroach.sql.sqlbase.ScanLockingWaitPolicy" json:"locking_wait_policy"`
 }
 
@@ -623,7 +695,7 @@ func (m *IndexSkipTableReaderSpec) Reset()         { *m = IndexSkipTableReaderSp
 func (m *IndexSkipTableReaderSpec) String() string { return proto.CompactTextString(m) }
 func (*IndexSkipTableReaderSpec) ProtoMessage()    {}
 func (*IndexSkipTableReaderSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{2}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{3}
 }
 func (m *IndexSkipTableReaderSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -670,6 +742,60 @@ var xxx_messageInfo_IndexSkipTableReaderSpec proto.InternalMessageInfo
 //
 // If performing an index join (where a = c and b = d) (lookup columns is []):
 //        Internal columns: | c | d | e |
+//
+// There is a special case when a "join reader" is used as the second join in
+// a pair of joins to accomplish a LEFT_OUTER, LEFT_SEMI or LEFT_ANTI join.
+// The first join in this pair of joins is unable to precisely evaluate the
+// join condition and produces false positives. This is typical when the first
+// join is an inverted join (see InvertedJoinerSpec), but can also be the case
+// when the first join is being evaluated over an index that does not have all
+// the columns needed to evaluate the join condition. The first join outputs
+// rows in sorted order of the original left columns. The input stream columns
+// for the second join are a combination of the original left columns and the
+// lookup columns. The first join additionally adds a continuation column that
+// demarcates a group of successive rows that correspond to an original left
+// row. The first row in a group contains false (since it is not a
+// continuation of the group) and successive rows contain true.
+//
+// The mapping from the original join to the pair of joins is:
+// LEFT_OUTER => LEFT_OUTER, LEFT_OUTER
+// LEFT_SEMI  => INNER, LEFT_SEMI (better than doing INNER, INNER, SORT, DISTINCT)
+// LEFT_ANTI  => LEFT_OUTER, LEFT_ANTI.
+// where the first join always preserves order.
+//
+// More specifically, consider a lookup join example where the input stream
+// columns are: | a | b | c | d | cont |.
+// The lookup column is | d |. And the table columns are | e | f | with
+// d = e.
+// This join reader can see input of the form
+// a1, b1, c1, d1,   false
+// a1, b1, c1, d2,   true
+// a1, b2, c1, null, false // when the first join is LEFT_OUTER
+// a2, b1, c1, d3,   false
+// a2, b1, c1, d4,   true
+//
+// Say both the results for (a1, b1, c1) are false positives, and the first
+// of the (a2, b1, c1) result is a false positive.
+// The output for LEFT_OUTER:
+// a1, b1, c1, d1,   false, null, null
+// a1, b2, c1, null, false, null, null
+// a2, b1, c1, d4,   true,  d4,   f1
+// The d, cont columns are not part of the original left row, so will be
+// projected away after the join.
+//
+// The output for LEFT_ANTI:
+// a1, b1, c1, d1,   false
+// a1, b2, c1, null, false
+// Again, the d, cont columns will be projected away after the join.
+//
+// The output for LEFT_SEMI:
+// a2, b1, c1, d4, true
+// Again, the d, cont columns will be projected away after the join.
+//
+// The example above is for a lookup join as the second join in the
+// paired-joins. The lookup join can also be the first join in the
+// paired-joins, which is indicated by both
+// OutputGroupContinuationForLeftRow and MaintainOrdering set to true.
 type JoinReaderSpec struct {
 	Table descpb.TableDescriptor `protobuf:"bytes,1,opt,name=table" json:"table"`
 	// If 0, we use the primary index; each row in the input stream has a value
@@ -693,8 +819,8 @@ type JoinReaderSpec struct {
 	// "ON" expression (in addition to the equality constraints captured by the
 	// orderings). Assuming that the left stream has N columns and the right
 	// stream has M columns, in this expression variables @1 to @N refer to
-	// columns of the left stream and variables @N to @(N+M) refer to columns in
-	// the right stream.
+	// columns of the left stream and variables @(N+1) to @(N+M) refer to columns
+	// in the right stream.
 	OnExpr Expression `protobuf:"bytes,4,opt,name=on_expr,json=onExpr" json:"on_expr"`
 	// For lookup joins. Only JoinType_INNER and JoinType_LEFT_OUTER are
 	// supported.
@@ -708,32 +834,39 @@ type JoinReaderSpec struct {
 	// Indicates the row-level locking strength to be used by the join. If set to
 	// FOR_NONE, no row-level locking should be performed.
 	LockingStrength descpb.ScanLockingStrength `protobuf:"varint,9,opt,name=locking_strength,json=lockingStrength,enum=cockroach.sql.sqlbase.ScanLockingStrength" json:"locking_strength"`
-	// Indicates the policy to be used by the join when dealing with rows being
-	// locked. Always set to BLOCK when locking_stength is FOR_NONE.
-	//
-	// NOTE: this is currently set but unused because only the BLOCK wait policy
-	// makes it out of the SQL optimizer without throwing an error. If/when other
-	// wait policies are supported, this field will be plumbed further.
+	// Indicates the policy to be used by the join for handling conflicting locks
+	// held by other active transactions when attempting to lock rows. Always set
+	// to BLOCK when locking_stength is FOR_NONE.
 	LockingWaitPolicy descpb.ScanLockingWaitPolicy `protobuf:"varint,10,opt,name=locking_wait_policy,json=lockingWaitPolicy,enum=cockroach.sql.sqlbase.ScanLockingWaitPolicy" json:"locking_wait_policy"`
 	// Indicates that the join reader should maintain the ordering of the input
-	// stream. This is only applicable to lookup joins, where doing so is
-	// expensive. Index joins do this by default regardless of the parameter.
+	// stream. This is applicable to both lookup joins and index joins.
+	// Maintaining ordering with lookup joins is expensive. With index joins,
+	// not maintaining ordering allows for optimizations at lower layers.
 	MaintainOrdering bool `protobuf:"varint,11,opt,name=maintain_ordering,json=maintainOrdering" json:"maintain_ordering"`
-	// Indicates what implicit system columns this JoinReader is expected to
-	// synthesize. These system columns will be placed at the end of the row
-	// output by the JoinReader, in the order specified.
+	// Indicates whether or not this JoinReader is expected to produce any
+	// system columns in its output.
 	//
 	// This is only used in the special case of index joins, where the final
 	// result of the secondary index joined against the primary index is
 	// expected to contain the materialized system columns.
-	SystemColumns []descpb.SystemColumnKind `protobuf:"varint,12,rep,name=system_columns,json=systemColumns,enum=cockroach.sql.sqlbase.SystemColumnKind" json:"system_columns,omitempty"`
+	HasSystemColumns bool `protobuf:"varint,13,opt,name=has_system_columns,json=hasSystemColumns" json:"has_system_columns"`
+	// LeftJoinWithPairedJoiner is used when a left {outer,anti,semi} join is
+	// being achieved by pairing two joins, and this is the second join. See
+	// the comment above.
+	LeftJoinWithPairedJoiner bool `protobuf:"varint,14,opt,name=left_join_with_paired_joiner,json=leftJoinWithPairedJoiner" json:"left_join_with_paired_joiner"`
+	// OutputGroupContinuationForLeftRow indicates that this join is the first
+	// join in the paired-joins. At most one of OutputGroupContinuationForLeftRow
+	// and LeftJoinWithPairedJoiner must be true. Additionally, if
+	// OutputGroupContinuationForLeftRow is true, MaintainOrdering must also
+	// be true.
+	OutputGroupContinuationForLeftRow bool `protobuf:"varint,15,opt,name=output_group_continuation_for_left_row,json=outputGroupContinuationForLeftRow" json:"output_group_continuation_for_left_row"`
 }
 
 func (m *JoinReaderSpec) Reset()         { *m = JoinReaderSpec{} }
 func (m *JoinReaderSpec) String() string { return proto.CompactTextString(m) }
 func (*JoinReaderSpec) ProtoMessage()    {}
 func (*JoinReaderSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{3}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{4}
 }
 func (m *JoinReaderSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -777,7 +910,7 @@ func (m *SorterSpec) Reset()         { *m = SorterSpec{} }
 func (m *SorterSpec) String() string { return proto.CompactTextString(m) }
 func (*SorterSpec) ProtoMessage()    {}
 func (*SorterSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{4}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{5}
 }
 func (m *SorterSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -839,7 +972,7 @@ func (m *DistinctSpec) Reset()         { *m = DistinctSpec{} }
 func (m *DistinctSpec) String() string { return proto.CompactTextString(m) }
 func (*DistinctSpec) ProtoMessage()    {}
 func (*DistinctSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{5}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{6}
 }
 func (m *DistinctSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -874,7 +1007,7 @@ func (m *OrdinalitySpec) Reset()         { *m = OrdinalitySpec{} }
 func (m *OrdinalitySpec) String() string { return proto.CompactTextString(m) }
 func (*OrdinalitySpec) ProtoMessage()    {}
 func (*OrdinalitySpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{6}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{7}
 }
 func (m *OrdinalitySpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -932,7 +1065,7 @@ func (m *ZigzagJoinerSpec) Reset()         { *m = ZigzagJoinerSpec{} }
 func (m *ZigzagJoinerSpec) String() string { return proto.CompactTextString(m) }
 func (*ZigzagJoinerSpec) ProtoMessage()    {}
 func (*ZigzagJoinerSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{7}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{8}
 }
 func (m *ZigzagJoinerSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -966,14 +1099,18 @@ var xxx_messageInfo_ZigzagJoinerSpec proto.InternalMessageInfo
 // same ordering on columns C1, C2 and C5, C4 respectively. For example: C1+,C2-
 // and C5+,C4-.
 //
-// The "internal columns" of a MergeJoiner (see ProcessorSpec) are the
-// concatenation of left input columns and right input columns. If the left
-// input has N columns and the right input has M columns, the first N columns
-// contain values from the left side and the following M columns contain values
-// from the right side.
+// The "internal columns" of a MergeJoiner (see ProcessorSpec) are:
+// - for INNER, LEFT_OUTER, RIGHT_OUTER, FULL_OUTER - the concatenation of left
+//   input columns and right input columns.
+//   If the left input has N columns and the right input has M columns, the
+//   first N columns contain values from the left side and the following M
+//   columns contain values from the right side.
+// - for LEFT_SEMI, LEFT_ANTI, INTERSECT_ALL, EXCEPT_ALL - the left input
+//   columns.
+// - for RIGHT_SEMI, RIGHT_ANTI - the right input columns.
 //
-// In the case of semi-join and anti-join, the processor core outputs only the
-// left columns.
+// Note that, regardless of the join type, an optional ON expression can refer
+// to columns from both inputs.
 type MergeJoinerSpec struct {
 	// The streams must be ordered according to the columns that have equality
 	// constraints. The first column of the left ordering is constrained to be
@@ -1008,7 +1145,7 @@ func (m *MergeJoinerSpec) Reset()         { *m = MergeJoinerSpec{} }
 func (m *MergeJoinerSpec) String() string { return proto.CompactTextString(m) }
 func (*MergeJoinerSpec) ProtoMessage()    {}
 func (*MergeJoinerSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{8}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{9}
 }
 func (m *MergeJoinerSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1043,21 +1180,18 @@ var xxx_messageInfo_MergeJoinerSpec proto.InternalMessageInfo
 // i.e. all results that stem from left row (i) precede results that stem from
 // left row (i+1).
 //
-// The "internal columns" of a HashJoiner (see ProcessorSpec) are the
-// concatenation of merged columns (if present), left input columns and right
-// input columns. Each merged column corresponds to a left and a right equality
-// column; its value is the value on the left if it is not NULL, otherwise it is
-// the value on the right. There are either zero or
-// E=len(left_eq_columns)=len(right_eq_columns) merged columns.
+// The "internal columns" of a HashJoiner (see ProcessorSpec) are:
+// - for INNER, LEFT_OUTER, RIGHT_OUTER, FULL_OUTER - the concatenation of left
+//   input columns and right input columns.
+//   If the left input has N columns and the right input has M columns, the
+//   first N columns contain values from the left side and the following M
+//   columns contain values from the right side.
+// - for LEFT_SEMI, LEFT_ANTI, INTERSECT_ALL, EXCEPT_ALL - the left input
+//   columns.
+// - for RIGHT_SEMI, RIGHT_ANTI - the right input columns.
 //
-// If the left input has N columns and the right input has M columns, the
-// first N columns contain values from the left side and the following M columns
-// contain values from the right side. If merged columns are present, they
-// occupy first E positions followed by N values from the left side and M values
-// from the right side.
-//
-// In the case of semi-join and anti-join, the processor core outputs only the
-// left columns.
+// Note that, regardless of the join type, an optional ON expression can refer
+// to columns from both inputs.
 type HashJoinerSpec struct {
 	// The join constraints certain columns from the left stream to equal
 	// corresponding columns on the right stream. These must have the same length.
@@ -1066,9 +1200,8 @@ type HashJoinerSpec struct {
 	// "ON" expression (in addition to the equality constraints captured by the
 	// orderings). Assuming that the left stream has N columns and the right
 	// stream has M columns, in this expression variables @1 to @N refer to
-	// columns of the left stream and variables @N to @(N+M) refer to columns in
-	// the right stream.
-	// Having "ON" expression implies no merged columns.
+	// columns of the left stream and variables @(N+1) to @(N+M) refer to columns
+	// in the right stream.
 	OnExpr Expression      `protobuf:"bytes,5,opt,name=on_expr,json=onExpr" json:"on_expr"`
 	Type   descpb.JoinType `protobuf:"varint,6,opt,name=type,enum=cockroach.sql.sqlbase.JoinType" json:"type"`
 	// If true, it is guaranteed that the left equality columns form a key for
@@ -1079,23 +1212,13 @@ type HashJoinerSpec struct {
 	// the right input. In other words, no two rows from the right input have the
 	// same set of values on the right equality columns.
 	RightEqColumnsAreKey bool `protobuf:"varint,9,opt,name=right_eq_columns_are_key,json=rightEqColumnsAreKey" json:"right_eq_columns_are_key"`
-	// DEPRECATED
-	//
-	// Extra merged columns that are added in case of OUTER JOINS. These
-	// columns occupy first positions in a row amd it's the left value if it's not
-	// NULL, otherwise it's the right value. In INNER JOIN case no merged columns are
-	// needed since left stream values are guaranteed to be not NULL.
-	//
-	// This has been deprecated; the distsqlrun layer still supports it for
-	// backward compatibility during upgrade.
-	MergedColumns bool `protobuf:"varint,7,opt,name=merged_columns,json=mergedColumns" json:"merged_columns"`
 }
 
 func (m *HashJoinerSpec) Reset()         { *m = HashJoinerSpec{} }
 func (m *HashJoinerSpec) String() string { return proto.CompactTextString(m) }
 func (*HashJoinerSpec) ProtoMessage()    {}
 func (*HashJoinerSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{9}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{10}
 }
 func (m *HashJoinerSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1134,6 +1257,18 @@ var xxx_messageInfo_HashJoinerSpec proto.InternalMessageInfo
 // that was indexed). For LEFT_SEMI and LEFT_ANTI, the "internal columns" are
 // the columns of the left input.
 //
+// In many cases, the inverted join will contain false positives wrt the
+// original join condition. This is handled by pairing it with a lookup join.
+// This pairing works naturally when the user query specified INNER, by
+// running an INNER inverted join followed by INNER lookup join. For a user
+// query with LEFT_OUTER/LEFT_ANTI, the inverted join is run as a LEFT_OUTER
+// with a special mode that outputs an additional bool column that represents
+// whether this row is a continuation of a group, where a group is defined as
+// rows corresponding to the same original left row. This is paired with a
+// lookup join that also knows about the semantics of this bool column. For a
+// user query with LEFT_SEMI, the inverted join is run as an INNER join with
+// the same special mode. See the JoinReaderSpec for an example.
+//
 // Example:
 // Input stream columns: | a | b |
 // Table columns: | c | d | e |
@@ -1148,10 +1283,13 @@ var xxx_messageInfo_HashJoinerSpec proto.InternalMessageInfo
 // Internal columns for INNER and LEFT_OUTER: | a | b | c | d | e |
 // where d, e are not populated.
 // Internal columns for LEFT_SEMI and LEFT_ANTI: | a | b |
+//
+// For INNER/LEFT_OUTER with OutputGroupContinuationForLeftRow = true, the
+// internal columns include an additional bool column as the last column.
 type InvertedJoinerSpec struct {
 	Table descpb.TableDescriptor `protobuf:"bytes,1,opt,name=table" json:"table"`
 	// The ID of the inverted index. The first column in the index is the
-	// inverted column, and the the remaining columns are the primary key.
+	// inverted column, and the remaining columns are the primary key.
 	IndexIdx uint32 `protobuf:"varint,2,opt,name=index_idx,json=indexIdx" json:"index_idx"`
 	// Expression involving the indexed column and columns from the input.
 	// Assuming that the input stream has N columns and the table that has been
@@ -1183,13 +1321,20 @@ type InvertedJoinerSpec struct {
 	// allow the false positives to be eliminated by evaluating the exact
 	// expression on the rows output by this join.
 	Type descpb.JoinType `protobuf:"varint,6,opt,name=type,enum=cockroach.sql.sqlbase.JoinType" json:"type"`
+	// Indicates that the inverted joiner should maintain the ordering of the
+	// input stream.
+	MaintainOrdering bool `protobuf:"varint,7,opt,name=maintain_ordering,json=maintainOrdering" json:"maintain_ordering"`
+	// Indicates that the join should output a continuation column that
+	// indicates whether a row is a continuation of a group corresponding to a
+	// left row.
+	OutputGroupContinuationForLeftRow bool `protobuf:"varint,8,opt,name=output_group_continuation_for_left_row,json=outputGroupContinuationForLeftRow" json:"output_group_continuation_for_left_row"`
 }
 
 func (m *InvertedJoinerSpec) Reset()         { *m = InvertedJoinerSpec{} }
 func (m *InvertedJoinerSpec) String() string { return proto.CompactTextString(m) }
 func (*InvertedJoinerSpec) ProtoMessage()    {}
 func (*InvertedJoinerSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{10}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{11}
 }
 func (m *InvertedJoinerSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1230,19 +1375,27 @@ var xxx_messageInfo_InvertedJoinerSpec proto.InternalMessageInfo
 // Internal columns are | a | b | d |. The output sets b to NULL, since it does
 // not have the value of the original column that was indexed in the inverted
 // column.
+//
+// Optionally, there can be a pre-filtering spec that describes an expression
+// (derived from the original expression that was converted to inverted_expr),
+// that must evaluate to true on each inverted row. This is a performance
+// optimization -- for more details see invertedidx.PreFilterer (geometry
+// and geography inverted indexes are the only ones that currently use
+// pre-filtering).
 type InvertedFiltererSpec struct {
 	// The index in the input row of the inverted column.
 	InvertedColIdx uint32 `protobuf:"varint,1,opt,name=inverted_col_idx,json=invertedColIdx" json:"inverted_col_idx"`
 	// The expression to evaluate. The SpansToRead are ignored since they
 	// have already been used to setup the input.
-	InvertedExpr invertedexpr.SpanExpressionProto `protobuf:"bytes,2,opt,name=inverted_expr,json=invertedExpr" json:"inverted_expr"`
+	InvertedExpr    invertedexpr.SpanExpressionProto      `protobuf:"bytes,2,opt,name=inverted_expr,json=invertedExpr" json:"inverted_expr"`
+	PreFiltererSpec *InvertedFiltererSpec_PreFiltererSpec `protobuf:"bytes,6,opt,name=pre_filterer_spec,json=preFiltererSpec" json:"pre_filterer_spec,omitempty"`
 }
 
 func (m *InvertedFiltererSpec) Reset()         { *m = InvertedFiltererSpec{} }
 func (m *InvertedFiltererSpec) String() string { return proto.CompactTextString(m) }
 func (*InvertedFiltererSpec) ProtoMessage()    {}
 func (*InvertedFiltererSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{11}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{12}
 }
 func (m *InvertedFiltererSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1267,6 +1420,44 @@ func (m *InvertedFiltererSpec) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_InvertedFiltererSpec proto.InternalMessageInfo
 
+// Optional pre-filtering expression.
+type InvertedFiltererSpec_PreFiltererSpec struct {
+	// Expression has only one variable, @1, which refers to the column with
+	// the inverted index.
+	Expression Expression `protobuf:"bytes,1,opt,name=expression" json:"expression"`
+	// The type of the original column that was indexed in the inverted index.
+	Type *types.T `protobuf:"bytes,2,opt,name=type" json:"type,omitempty"`
+}
+
+func (m *InvertedFiltererSpec_PreFiltererSpec) Reset()         { *m = InvertedFiltererSpec_PreFiltererSpec{} }
+func (m *InvertedFiltererSpec_PreFiltererSpec) String() string { return proto.CompactTextString(m) }
+func (*InvertedFiltererSpec_PreFiltererSpec) ProtoMessage()    {}
+func (*InvertedFiltererSpec_PreFiltererSpec) Descriptor() ([]byte, []int) {
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{12, 0}
+}
+func (m *InvertedFiltererSpec_PreFiltererSpec) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *InvertedFiltererSpec_PreFiltererSpec) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *InvertedFiltererSpec_PreFiltererSpec) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_InvertedFiltererSpec_PreFiltererSpec.Merge(dst, src)
+}
+func (m *InvertedFiltererSpec_PreFiltererSpec) XXX_Size() int {
+	return m.Size()
+}
+func (m *InvertedFiltererSpec_PreFiltererSpec) XXX_DiscardUnknown() {
+	xxx_messageInfo_InvertedFiltererSpec_PreFiltererSpec.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_InvertedFiltererSpec_PreFiltererSpec proto.InternalMessageInfo
+
 // AggregatorSpec is the specification for an "aggregator" (processor core
 // type, not the logical plan computation stage). An aggregator performs
 // 'aggregation' in the SQL sense in that it groups rows and computes an aggregate
@@ -1288,7 +1479,7 @@ func (m *AggregatorSpec) Reset()         { *m = AggregatorSpec{} }
 func (m *AggregatorSpec) String() string { return proto.CompactTextString(m) }
 func (*AggregatorSpec) ProtoMessage()    {}
 func (*AggregatorSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{12}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{13}
 }
 func (m *AggregatorSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1339,7 +1530,7 @@ func (m *AggregatorSpec_Aggregation) Reset()         { *m = AggregatorSpec_Aggre
 func (m *AggregatorSpec_Aggregation) String() string { return proto.CompactTextString(m) }
 func (*AggregatorSpec_Aggregation) ProtoMessage()    {}
 func (*AggregatorSpec_Aggregation) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{12, 0}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{13, 0}
 }
 func (m *AggregatorSpec_Aggregation) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1364,137 +1555,6 @@ func (m *AggregatorSpec_Aggregation) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_AggregatorSpec_Aggregation proto.InternalMessageInfo
 
-// InterleavedReaderJoinerSpec is the specification for a processor that performs
-// KV operations to retrieve rows from 2+ tables from an interleaved hierarchy,
-// performs intermediate filtering on rows from each table, and performs a
-// join on the rows from the 2+ tables.
-//
-// Limitations: the InterleavedReaderJoiner currently supports only equality joins
-// on the full interleave prefix.
-// See https://github.com/cockroachdb/cockroach/blob/master/docs/RFCS/20171025_interleaved_table_joins.md.
-//
-// The "internal columns" of an InterleavedReaderJoiner are the
-// concatenation of left input columns and right input columns. If the left
-// table has N columns and the right table has M columns, the first N columns
-// contain values from the left table and the following M columns contain values
-// from the right table.
-type InterleavedReaderJoinerSpec struct {
-	// The tables can be in any order. The processor figures out internally the
-	// hierarchy between them.
-	Tables  []InterleavedReaderJoinerSpec_Table `protobuf:"bytes,1,rep,name=tables" json:"tables"`
-	Reverse bool                                `protobuf:"varint,2,opt,name=reverse" json:"reverse"`
-	// A hint for how many joined rows from the tables the consumer of the
-	// interleavedReaderJoiner might need. This is used to size the initial KV
-	// batches to try to avoid reading many more rows than needed by the
-	// processor receiving the output.
-	// Not used if there is a limit set in the PostProcessSpec of this processor
-	// (that value will be used for sizing batches instead).
-	LimitHint int64 `protobuf:"varint,3,opt,name=limit_hint,json=limitHint" json:"limit_hint"`
-	// Indicates the row-level locking strength to be used by the scan over the
-	// tables. If set to FOR_NONE, no row-level locking should be performed.
-	LockingStrength descpb.ScanLockingStrength `protobuf:"varint,6,opt,name=locking_strength,json=lockingStrength,enum=cockroach.sql.sqlbase.ScanLockingStrength" json:"locking_strength"`
-	// Indicates the policy to be used by the scan over the tables when dealing
-	// with rows being locked. Always set to BLOCK when locking_stength is
-	// FOR_NONE.
-	//
-	// NOTE: this is currently set but unused because only the BLOCK wait policy
-	// makes it out of the SQL optimizer without throwing an error. If/when other
-	// wait policies are supported, this field will be plumbed further.
-	LockingWaitPolicy descpb.ScanLockingWaitPolicy `protobuf:"varint,7,opt,name=locking_wait_policy,json=lockingWaitPolicy,enum=cockroach.sql.sqlbase.ScanLockingWaitPolicy" json:"locking_wait_policy"`
-	// "ON" expression (in addition to the equality constraints captured by the
-	// orderings). Assuming that the left table has N columns and the second
-	// table stream has M columns, in this expression ordinal references @1 to @N
-	// refer to columns of the left table and variables @(N+1) to @(N+M) refer to
-	// columns in the right table.
-	OnExpr Expression      `protobuf:"bytes,4,opt,name=on_expr,json=onExpr" json:"on_expr"`
-	Type   descpb.JoinType `protobuf:"varint,5,opt,name=type,enum=cockroach.sql.sqlbase.JoinType" json:"type"`
-}
-
-func (m *InterleavedReaderJoinerSpec) Reset()         { *m = InterleavedReaderJoinerSpec{} }
-func (m *InterleavedReaderJoinerSpec) String() string { return proto.CompactTextString(m) }
-func (*InterleavedReaderJoinerSpec) ProtoMessage()    {}
-func (*InterleavedReaderJoinerSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{13}
-}
-func (m *InterleavedReaderJoinerSpec) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *InterleavedReaderJoinerSpec) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalTo(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (dst *InterleavedReaderJoinerSpec) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_InterleavedReaderJoinerSpec.Merge(dst, src)
-}
-func (m *InterleavedReaderJoinerSpec) XXX_Size() int {
-	return m.Size()
-}
-func (m *InterleavedReaderJoinerSpec) XXX_DiscardUnknown() {
-	xxx_messageInfo_InterleavedReaderJoinerSpec.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_InterleavedReaderJoinerSpec proto.InternalMessageInfo
-
-type InterleavedReaderJoinerSpec_Table struct {
-	Desc descpb.TableDescriptor `protobuf:"bytes,1,opt,name=desc" json:"desc"`
-	// If 0, we use the primary index. If non-zero, we use the index_idx-th index,
-	// i.e. desc.indexes[index_idx-1]
-	IndexIdx uint32 `protobuf:"varint,2,opt,name=index_idx,json=indexIdx" json:"index_idx"`
-	// The PostProcessSpecs of the corresponding TableReaderSpecs of each table
-	// are fed as arguments to InterleavedReaderJoiner.
-	//
-	// This is required to properly post-process the rows (i.e. filtering and
-	// projections) after reading from the table but before joining.
-	// It may be necessary to modify/introduce additional intermediate filters
-	// for correctness (see comment above 'spans' under
-	// InterleavedReaderJoinerSpec).
-	Post PostProcessSpec `protobuf:"bytes,3,opt,name=post" json:"post"`
-	// The tables must be ordered according to the columns that have equality
-	// constraints. The first column of the first table's ordering is constrained
-	// to be equal to the first column in the second table's ordering and so on
-	// for the other tables and their corresponding columns.
-	Ordering Ordering `protobuf:"bytes,4,opt,name=ordering" json:"ordering"`
-	// The span covering the rows from this table to join. Note the
-	// InterleavedReaderJoiner processor will taking the union of all spans across
-	// all tables to do a single pass-through scan. InterleavedReaderJoiner will
-	// then check if a given row for a table is within any of its spans.
-	// There must exist at least one non-empty set of spans for some table.
-	Spans []TableReaderSpan `protobuf:"bytes,5,rep,name=spans" json:"spans"`
-}
-
-func (m *InterleavedReaderJoinerSpec_Table) Reset()         { *m = InterleavedReaderJoinerSpec_Table{} }
-func (m *InterleavedReaderJoinerSpec_Table) String() string { return proto.CompactTextString(m) }
-func (*InterleavedReaderJoinerSpec_Table) ProtoMessage()    {}
-func (*InterleavedReaderJoinerSpec_Table) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{13, 0}
-}
-func (m *InterleavedReaderJoinerSpec_Table) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *InterleavedReaderJoinerSpec_Table) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalTo(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (dst *InterleavedReaderJoinerSpec_Table) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_InterleavedReaderJoinerSpec_Table.Merge(dst, src)
-}
-func (m *InterleavedReaderJoinerSpec_Table) XXX_Size() int {
-	return m.Size()
-}
-func (m *InterleavedReaderJoinerSpec_Table) XXX_DiscardUnknown() {
-	xxx_messageInfo_InterleavedReaderJoinerSpec_Table.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_InterleavedReaderJoinerSpec_Table proto.InternalMessageInfo
-
 // ProjectSetSpec is the specification of a processor which applies a set of
 // expressions, which may be set-returning functions, to its input.
 type ProjectSetSpec struct {
@@ -1510,7 +1570,7 @@ func (m *ProjectSetSpec) Reset()         { *m = ProjectSetSpec{} }
 func (m *ProjectSetSpec) String() string { return proto.CompactTextString(m) }
 func (*ProjectSetSpec) ProtoMessage()    {}
 func (*ProjectSetSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{14}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{14}
 }
 func (m *ProjectSetSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1552,7 +1612,7 @@ func (m *WindowerSpec) Reset()         { *m = WindowerSpec{} }
 func (m *WindowerSpec) String() string { return proto.CompactTextString(m) }
 func (*WindowerSpec) ProtoMessage()    {}
 func (*WindowerSpec) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15}
 }
 func (m *WindowerSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1588,7 +1648,7 @@ func (m *WindowerSpec_Func) Reset()         { *m = WindowerSpec_Func{} }
 func (m *WindowerSpec_Func) String() string { return proto.CompactTextString(m) }
 func (*WindowerSpec_Func) ProtoMessage()    {}
 func (*WindowerSpec_Func) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15, 0}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15, 0}
 }
 func (m *WindowerSpec_Func) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1624,7 +1684,7 @@ func (m *WindowerSpec_Frame) Reset()         { *m = WindowerSpec_Frame{} }
 func (m *WindowerSpec_Frame) String() string { return proto.CompactTextString(m) }
 func (*WindowerSpec_Frame) ProtoMessage()    {}
 func (*WindowerSpec_Frame) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15, 1}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15, 1}
 }
 func (m *WindowerSpec_Frame) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1665,7 +1725,7 @@ func (m *WindowerSpec_Frame_Bound) Reset()         { *m = WindowerSpec_Frame_Bou
 func (m *WindowerSpec_Frame_Bound) String() string { return proto.CompactTextString(m) }
 func (*WindowerSpec_Frame_Bound) ProtoMessage()    {}
 func (*WindowerSpec_Frame_Bound) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15, 1, 0}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15, 1, 0}
 }
 func (m *WindowerSpec_Frame_Bound) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1701,7 +1761,7 @@ func (m *WindowerSpec_Frame_Bounds) Reset()         { *m = WindowerSpec_Frame_Bo
 func (m *WindowerSpec_Frame_Bounds) String() string { return proto.CompactTextString(m) }
 func (*WindowerSpec_Frame_Bounds) ProtoMessage()    {}
 func (*WindowerSpec_Frame_Bounds) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15, 1, 1}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15, 1, 1}
 }
 func (m *WindowerSpec_Frame_Bounds) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1751,7 +1811,7 @@ func (m *WindowerSpec_WindowFn) Reset()         { *m = WindowerSpec_WindowFn{} }
 func (m *WindowerSpec_WindowFn) String() string { return proto.CompactTextString(m) }
 func (*WindowerSpec_WindowFn) ProtoMessage()    {}
 func (*WindowerSpec_WindowFn) Descriptor() ([]byte, []int) {
-	return fileDescriptor_processors_sql_1877ce89820fdbbd, []int{15, 2}
+	return fileDescriptor_processors_sql_0901999adc18b9c0, []int{15, 2}
 }
 func (m *WindowerSpec_WindowFn) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -1779,6 +1839,7 @@ var xxx_messageInfo_WindowerSpec_WindowFn proto.InternalMessageInfo
 func init() {
 	proto.RegisterType((*ValuesCoreSpec)(nil), "cockroach.sql.distsqlrun.ValuesCoreSpec")
 	proto.RegisterType((*TableReaderSpec)(nil), "cockroach.sql.distsqlrun.TableReaderSpec")
+	proto.RegisterType((*FiltererSpec)(nil), "cockroach.sql.distsqlrun.FiltererSpec")
 	proto.RegisterType((*IndexSkipTableReaderSpec)(nil), "cockroach.sql.distsqlrun.IndexSkipTableReaderSpec")
 	proto.RegisterType((*JoinReaderSpec)(nil), "cockroach.sql.distsqlrun.JoinReaderSpec")
 	proto.RegisterType((*SorterSpec)(nil), "cockroach.sql.distsqlrun.SorterSpec")
@@ -1789,10 +1850,9 @@ func init() {
 	proto.RegisterType((*HashJoinerSpec)(nil), "cockroach.sql.distsqlrun.HashJoinerSpec")
 	proto.RegisterType((*InvertedJoinerSpec)(nil), "cockroach.sql.distsqlrun.InvertedJoinerSpec")
 	proto.RegisterType((*InvertedFiltererSpec)(nil), "cockroach.sql.distsqlrun.InvertedFiltererSpec")
+	proto.RegisterType((*InvertedFiltererSpec_PreFiltererSpec)(nil), "cockroach.sql.distsqlrun.InvertedFiltererSpec.PreFiltererSpec")
 	proto.RegisterType((*AggregatorSpec)(nil), "cockroach.sql.distsqlrun.AggregatorSpec")
 	proto.RegisterType((*AggregatorSpec_Aggregation)(nil), "cockroach.sql.distsqlrun.AggregatorSpec.Aggregation")
-	proto.RegisterType((*InterleavedReaderJoinerSpec)(nil), "cockroach.sql.distsqlrun.InterleavedReaderJoinerSpec")
-	proto.RegisterType((*InterleavedReaderJoinerSpec_Table)(nil), "cockroach.sql.distsqlrun.InterleavedReaderJoinerSpec.Table")
 	proto.RegisterType((*ProjectSetSpec)(nil), "cockroach.sql.distsqlrun.ProjectSetSpec")
 	proto.RegisterType((*WindowerSpec)(nil), "cockroach.sql.distsqlrun.WindowerSpec")
 	proto.RegisterType((*WindowerSpec_Func)(nil), "cockroach.sql.distsqlrun.WindowerSpec.Func")
@@ -1926,13 +1986,47 @@ func (m *TableReaderSpec) MarshalTo(dAtA []byte) (int, error) {
 		dAtA[i] = 0
 	}
 	i++
-	if len(m.SystemColumns) > 0 {
-		for _, num := range m.SystemColumns {
-			dAtA[i] = 0x68
+	dAtA[i] = 0x70
+	i++
+	if m.HasSystemColumns {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
+	if len(m.NeededColumns) > 0 {
+		for _, num := range m.NeededColumns {
+			dAtA[i] = 0x78
 			i++
 			i = encodeVarintProcessorsSql(dAtA, i, uint64(num))
 		}
 	}
+	return i, nil
+}
+
+func (m *FiltererSpec) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *FiltererSpec) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0xa
+	i++
+	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Filter.Size()))
+	n2, err := m.Filter.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n2
 	return i, nil
 }
 
@@ -1954,11 +2048,11 @@ func (m *IndexSkipTableReaderSpec) MarshalTo(dAtA []byte) (int, error) {
 	dAtA[i] = 0xa
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Table.Size()))
-	n2, err := m.Table.MarshalTo(dAtA[i:])
+	n3, err := m.Table.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n2
+	i += n3
 	dAtA[i] = 0x10
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.IndexIdx))
@@ -2012,39 +2106,39 @@ func (m *JoinReaderSpec) MarshalTo(dAtA []byte) (int, error) {
 	dAtA[i] = 0xa
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Table.Size()))
-	n3, err := m.Table.MarshalTo(dAtA[i:])
+	n4, err := m.Table.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n3
+	i += n4
 	dAtA[i] = 0x10
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.IndexIdx))
 	if len(m.LookupColumns) > 0 {
-		dAtA5 := make([]byte, len(m.LookupColumns)*10)
-		var j4 int
+		dAtA6 := make([]byte, len(m.LookupColumns)*10)
+		var j5 int
 		for _, num := range m.LookupColumns {
 			for num >= 1<<7 {
-				dAtA5[j4] = uint8(uint64(num)&0x7f | 0x80)
+				dAtA6[j5] = uint8(uint64(num)&0x7f | 0x80)
 				num >>= 7
-				j4++
+				j5++
 			}
-			dAtA5[j4] = uint8(num)
-			j4++
+			dAtA6[j5] = uint8(num)
+			j5++
 		}
 		dAtA[i] = 0x1a
 		i++
-		i = encodeVarintProcessorsSql(dAtA, i, uint64(j4))
-		i += copy(dAtA[i:], dAtA5[:j4])
+		i = encodeVarintProcessorsSql(dAtA, i, uint64(j5))
+		i += copy(dAtA[i:], dAtA6[:j5])
 	}
 	dAtA[i] = 0x22
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OnExpr.Size()))
-	n6, err := m.OnExpr.MarshalTo(dAtA[i:])
+	n7, err := m.OnExpr.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n6
+	i += n7
 	dAtA[i] = 0x30
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Type))
@@ -2073,13 +2167,30 @@ func (m *JoinReaderSpec) MarshalTo(dAtA []byte) (int, error) {
 		dAtA[i] = 0
 	}
 	i++
-	if len(m.SystemColumns) > 0 {
-		for _, num := range m.SystemColumns {
-			dAtA[i] = 0x60
-			i++
-			i = encodeVarintProcessorsSql(dAtA, i, uint64(num))
-		}
+	dAtA[i] = 0x68
+	i++
+	if m.HasSystemColumns {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
 	}
+	i++
+	dAtA[i] = 0x70
+	i++
+	if m.LeftJoinWithPairedJoiner {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
+	dAtA[i] = 0x78
+	i++
+	if m.OutputGroupContinuationForLeftRow {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
 	return i, nil
 }
 
@@ -2101,11 +2212,11 @@ func (m *SorterSpec) MarshalTo(dAtA []byte) (int, error) {
 	dAtA[i] = 0xa
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OutputOrdering.Size()))
-	n7, err := m.OutputOrdering.MarshalTo(dAtA[i:])
+	n8, err := m.OutputOrdering.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n7
+	i += n8
 	dAtA[i] = 0x10
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OrderingMatchLen))
@@ -2214,30 +2325,30 @@ func (m *ZigzagJoinerSpec) MarshalTo(dAtA []byte) (int, error) {
 		}
 	}
 	if len(m.IndexOrdinals) > 0 {
-		dAtA9 := make([]byte, len(m.IndexOrdinals)*10)
-		var j8 int
+		dAtA10 := make([]byte, len(m.IndexOrdinals)*10)
+		var j9 int
 		for _, num := range m.IndexOrdinals {
 			for num >= 1<<7 {
-				dAtA9[j8] = uint8(uint64(num)&0x7f | 0x80)
+				dAtA10[j9] = uint8(uint64(num)&0x7f | 0x80)
 				num >>= 7
-				j8++
+				j9++
 			}
-			dAtA9[j8] = uint8(num)
-			j8++
+			dAtA10[j9] = uint8(num)
+			j9++
 		}
 		dAtA[i] = 0x1a
 		i++
-		i = encodeVarintProcessorsSql(dAtA, i, uint64(j8))
-		i += copy(dAtA[i:], dAtA9[:j8])
+		i = encodeVarintProcessorsSql(dAtA, i, uint64(j9))
+		i += copy(dAtA[i:], dAtA10[:j9])
 	}
 	dAtA[i] = 0x22
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OnExpr.Size()))
-	n10, err := m.OnExpr.MarshalTo(dAtA[i:])
+	n11, err := m.OnExpr.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n10
+	i += n11
 	if len(m.FixedValues) > 0 {
 		for _, msg := range m.FixedValues {
 			dAtA[i] = 0x2a
@@ -2274,27 +2385,27 @@ func (m *MergeJoinerSpec) MarshalTo(dAtA []byte) (int, error) {
 	dAtA[i] = 0xa
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.LeftOrdering.Size()))
-	n11, err := m.LeftOrdering.MarshalTo(dAtA[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n11
-	dAtA[i] = 0x12
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.RightOrdering.Size()))
-	n12, err := m.RightOrdering.MarshalTo(dAtA[i:])
+	n12, err := m.LeftOrdering.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n12
-	dAtA[i] = 0x2a
+	dAtA[i] = 0x12
 	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OnExpr.Size()))
-	n13, err := m.OnExpr.MarshalTo(dAtA[i:])
+	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.RightOrdering.Size()))
+	n13, err := m.RightOrdering.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n13
+	dAtA[i] = 0x2a
+	i++
+	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OnExpr.Size()))
+	n14, err := m.OnExpr.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n14
 	dAtA[i] = 0x30
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Type))
@@ -2341,58 +2452,50 @@ func (m *HashJoinerSpec) MarshalTo(dAtA []byte) (int, error) {
 	var l int
 	_ = l
 	if len(m.LeftEqColumns) > 0 {
-		dAtA15 := make([]byte, len(m.LeftEqColumns)*10)
-		var j14 int
+		dAtA16 := make([]byte, len(m.LeftEqColumns)*10)
+		var j15 int
 		for _, num := range m.LeftEqColumns {
 			for num >= 1<<7 {
-				dAtA15[j14] = uint8(uint64(num)&0x7f | 0x80)
+				dAtA16[j15] = uint8(uint64(num)&0x7f | 0x80)
 				num >>= 7
-				j14++
+				j15++
 			}
-			dAtA15[j14] = uint8(num)
-			j14++
+			dAtA16[j15] = uint8(num)
+			j15++
 		}
 		dAtA[i] = 0xa
 		i++
-		i = encodeVarintProcessorsSql(dAtA, i, uint64(j14))
-		i += copy(dAtA[i:], dAtA15[:j14])
+		i = encodeVarintProcessorsSql(dAtA, i, uint64(j15))
+		i += copy(dAtA[i:], dAtA16[:j15])
 	}
 	if len(m.RightEqColumns) > 0 {
-		dAtA17 := make([]byte, len(m.RightEqColumns)*10)
-		var j16 int
+		dAtA18 := make([]byte, len(m.RightEqColumns)*10)
+		var j17 int
 		for _, num := range m.RightEqColumns {
 			for num >= 1<<7 {
-				dAtA17[j16] = uint8(uint64(num)&0x7f | 0x80)
+				dAtA18[j17] = uint8(uint64(num)&0x7f | 0x80)
 				num >>= 7
-				j16++
+				j17++
 			}
-			dAtA17[j16] = uint8(num)
-			j16++
+			dAtA18[j17] = uint8(num)
+			j17++
 		}
 		dAtA[i] = 0x12
 		i++
-		i = encodeVarintProcessorsSql(dAtA, i, uint64(j16))
-		i += copy(dAtA[i:], dAtA17[:j16])
+		i = encodeVarintProcessorsSql(dAtA, i, uint64(j17))
+		i += copy(dAtA[i:], dAtA18[:j17])
 	}
 	dAtA[i] = 0x2a
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OnExpr.Size()))
-	n18, err := m.OnExpr.MarshalTo(dAtA[i:])
+	n19, err := m.OnExpr.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n18
+	i += n19
 	dAtA[i] = 0x30
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Type))
-	dAtA[i] = 0x38
-	i++
-	if m.MergedColumns {
-		dAtA[i] = 1
-	} else {
-		dAtA[i] = 0
-	}
-	i++
 	dAtA[i] = 0x40
 	i++
 	if m.LeftEqColumnsAreKey {
@@ -2430,33 +2533,49 @@ func (m *InvertedJoinerSpec) MarshalTo(dAtA []byte) (int, error) {
 	dAtA[i] = 0xa
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Table.Size()))
-	n19, err := m.Table.MarshalTo(dAtA[i:])
+	n20, err := m.Table.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n19
+	i += n20
 	dAtA[i] = 0x10
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.IndexIdx))
 	dAtA[i] = 0x22
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.InvertedExpr.Size()))
-	n20, err := m.InvertedExpr.MarshalTo(dAtA[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n20
-	dAtA[i] = 0x2a
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OnExpr.Size()))
-	n21, err := m.OnExpr.MarshalTo(dAtA[i:])
+	n21, err := m.InvertedExpr.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n21
+	dAtA[i] = 0x2a
+	i++
+	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OnExpr.Size()))
+	n22, err := m.OnExpr.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n22
 	dAtA[i] = 0x30
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Type))
+	dAtA[i] = 0x38
+	i++
+	if m.MaintainOrdering {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
+	dAtA[i] = 0x40
+	i++
+	if m.OutputGroupContinuationForLeftRow {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
 	return i, nil
 }
 
@@ -2481,11 +2600,57 @@ func (m *InvertedFiltererSpec) MarshalTo(dAtA []byte) (int, error) {
 	dAtA[i] = 0x12
 	i++
 	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.InvertedExpr.Size()))
-	n22, err := m.InvertedExpr.MarshalTo(dAtA[i:])
+	n23, err := m.InvertedExpr.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n22
+	i += n23
+	if m.PreFiltererSpec != nil {
+		dAtA[i] = 0x32
+		i++
+		i = encodeVarintProcessorsSql(dAtA, i, uint64(m.PreFiltererSpec.Size()))
+		n24, err := m.PreFiltererSpec.MarshalTo(dAtA[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n24
+	}
+	return i, nil
+}
+
+func (m *InvertedFiltererSpec_PreFiltererSpec) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *InvertedFiltererSpec_PreFiltererSpec) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0xa
+	i++
+	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Expression.Size()))
+	n25, err := m.Expression.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n25
+	if m.Type != nil {
+		dAtA[i] = 0x12
+		i++
+		i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Type.Size()))
+		n26, err := m.Type.MarshalTo(dAtA[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n26
+	}
 	return i, nil
 }
 
@@ -2505,21 +2670,21 @@ func (m *AggregatorSpec) MarshalTo(dAtA []byte) (int, error) {
 	var l int
 	_ = l
 	if len(m.GroupCols) > 0 {
-		dAtA24 := make([]byte, len(m.GroupCols)*10)
-		var j23 int
+		dAtA28 := make([]byte, len(m.GroupCols)*10)
+		var j27 int
 		for _, num := range m.GroupCols {
 			for num >= 1<<7 {
-				dAtA24[j23] = uint8(uint64(num)&0x7f | 0x80)
+				dAtA28[j27] = uint8(uint64(num)&0x7f | 0x80)
 				num >>= 7
-				j23++
+				j27++
 			}
-			dAtA24[j23] = uint8(num)
-			j23++
+			dAtA28[j27] = uint8(num)
+			j27++
 		}
 		dAtA[i] = 0x12
 		i++
-		i = encodeVarintProcessorsSql(dAtA, i, uint64(j23))
-		i += copy(dAtA[i:], dAtA24[:j23])
+		i = encodeVarintProcessorsSql(dAtA, i, uint64(j27))
+		i += copy(dAtA[i:], dAtA28[:j27])
 	}
 	if len(m.Aggregations) > 0 {
 		for _, msg := range m.Aggregations {
@@ -2534,21 +2699,21 @@ func (m *AggregatorSpec) MarshalTo(dAtA []byte) (int, error) {
 		}
 	}
 	if len(m.OrderedGroupCols) > 0 {
-		dAtA26 := make([]byte, len(m.OrderedGroupCols)*10)
-		var j25 int
+		dAtA30 := make([]byte, len(m.OrderedGroupCols)*10)
+		var j29 int
 		for _, num := range m.OrderedGroupCols {
 			for num >= 1<<7 {
-				dAtA26[j25] = uint8(uint64(num)&0x7f | 0x80)
+				dAtA30[j29] = uint8(uint64(num)&0x7f | 0x80)
 				num >>= 7
-				j25++
+				j29++
 			}
-			dAtA26[j25] = uint8(num)
-			j25++
+			dAtA30[j29] = uint8(num)
+			j29++
 		}
 		dAtA[i] = 0x22
 		i++
-		i = encodeVarintProcessorsSql(dAtA, i, uint64(j25))
-		i += copy(dAtA[i:], dAtA26[:j25])
+		i = encodeVarintProcessorsSql(dAtA, i, uint64(j29))
+		i += copy(dAtA[i:], dAtA30[:j29])
 	}
 	dAtA[i] = 0x28
 	i++
@@ -2597,121 +2762,6 @@ func (m *AggregatorSpec_Aggregation) MarshalTo(dAtA []byte) (int, error) {
 	if len(m.Arguments) > 0 {
 		for _, msg := range m.Arguments {
 			dAtA[i] = 0x32
-			i++
-			i = encodeVarintProcessorsSql(dAtA, i, uint64(msg.Size()))
-			n, err := msg.MarshalTo(dAtA[i:])
-			if err != nil {
-				return 0, err
-			}
-			i += n
-		}
-	}
-	return i, nil
-}
-
-func (m *InterleavedReaderJoinerSpec) Marshal() (dAtA []byte, err error) {
-	size := m.Size()
-	dAtA = make([]byte, size)
-	n, err := m.MarshalTo(dAtA)
-	if err != nil {
-		return nil, err
-	}
-	return dAtA[:n], nil
-}
-
-func (m *InterleavedReaderJoinerSpec) MarshalTo(dAtA []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	if len(m.Tables) > 0 {
-		for _, msg := range m.Tables {
-			dAtA[i] = 0xa
-			i++
-			i = encodeVarintProcessorsSql(dAtA, i, uint64(msg.Size()))
-			n, err := msg.MarshalTo(dAtA[i:])
-			if err != nil {
-				return 0, err
-			}
-			i += n
-		}
-	}
-	dAtA[i] = 0x10
-	i++
-	if m.Reverse {
-		dAtA[i] = 1
-	} else {
-		dAtA[i] = 0
-	}
-	i++
-	dAtA[i] = 0x18
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.LimitHint))
-	dAtA[i] = 0x22
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.OnExpr.Size()))
-	n27, err := m.OnExpr.MarshalTo(dAtA[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n27
-	dAtA[i] = 0x28
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Type))
-	dAtA[i] = 0x30
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.LockingStrength))
-	dAtA[i] = 0x38
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.LockingWaitPolicy))
-	return i, nil
-}
-
-func (m *InterleavedReaderJoinerSpec_Table) Marshal() (dAtA []byte, err error) {
-	size := m.Size()
-	dAtA = make([]byte, size)
-	n, err := m.MarshalTo(dAtA)
-	if err != nil {
-		return nil, err
-	}
-	return dAtA[:n], nil
-}
-
-func (m *InterleavedReaderJoinerSpec_Table) MarshalTo(dAtA []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	dAtA[i] = 0xa
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Desc.Size()))
-	n28, err := m.Desc.MarshalTo(dAtA[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n28
-	dAtA[i] = 0x10
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.IndexIdx))
-	dAtA[i] = 0x1a
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Post.Size()))
-	n29, err := m.Post.MarshalTo(dAtA[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n29
-	dAtA[i] = 0x22
-	i++
-	i = encodeVarintProcessorsSql(dAtA, i, uint64(m.Ordering.Size()))
-	n30, err := m.Ordering.MarshalTo(dAtA[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n30
-	if len(m.Spans) > 0 {
-		for _, msg := range m.Spans {
-			dAtA[i] = 0x2a
 			i++
 			i = encodeVarintProcessorsSql(dAtA, i, uint64(msg.Size()))
 			n, err := msg.MarshalTo(dAtA[i:])
@@ -3055,11 +3105,23 @@ func (m *TableReaderSpec) Size() (n int) {
 	n += 1 + sovProcessorsSql(uint64(m.LockingStrength))
 	n += 1 + sovProcessorsSql(uint64(m.LockingWaitPolicy))
 	n += 2
-	if len(m.SystemColumns) > 0 {
-		for _, e := range m.SystemColumns {
+	n += 2
+	if len(m.NeededColumns) > 0 {
+		for _, e := range m.NeededColumns {
 			n += 1 + sovProcessorsSql(uint64(e))
 		}
 	}
+	return n
+}
+
+func (m *FiltererSpec) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = m.Filter.Size()
+	n += 1 + l + sovProcessorsSql(uint64(l))
 	return n
 }
 
@@ -3109,11 +3171,9 @@ func (m *JoinReaderSpec) Size() (n int) {
 	n += 1 + sovProcessorsSql(uint64(m.LockingStrength))
 	n += 1 + sovProcessorsSql(uint64(m.LockingWaitPolicy))
 	n += 2
-	if len(m.SystemColumns) > 0 {
-		for _, e := range m.SystemColumns {
-			n += 1 + sovProcessorsSql(uint64(e))
-		}
-	}
+	n += 2
+	n += 2
+	n += 2
 	return n
 }
 
@@ -3241,7 +3301,6 @@ func (m *HashJoinerSpec) Size() (n int) {
 	n += 1 + sovProcessorsSql(uint64(m.Type))
 	n += 2
 	n += 2
-	n += 2
 	return n
 }
 
@@ -3259,6 +3318,8 @@ func (m *InvertedJoinerSpec) Size() (n int) {
 	l = m.OnExpr.Size()
 	n += 1 + l + sovProcessorsSql(uint64(l))
 	n += 1 + sovProcessorsSql(uint64(m.Type))
+	n += 2
+	n += 2
 	return n
 }
 
@@ -3271,6 +3332,25 @@ func (m *InvertedFiltererSpec) Size() (n int) {
 	n += 1 + sovProcessorsSql(uint64(m.InvertedColIdx))
 	l = m.InvertedExpr.Size()
 	n += 1 + l + sovProcessorsSql(uint64(l))
+	if m.PreFiltererSpec != nil {
+		l = m.PreFiltererSpec.Size()
+		n += 1 + l + sovProcessorsSql(uint64(l))
+	}
+	return n
+}
+
+func (m *InvertedFiltererSpec_PreFiltererSpec) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = m.Expression.Size()
+	n += 1 + l + sovProcessorsSql(uint64(l))
+	if m.Type != nil {
+		l = m.Type.Size()
+		n += 1 + l + sovProcessorsSql(uint64(l))
+	}
 	return n
 }
 
@@ -3322,50 +3402,6 @@ func (m *AggregatorSpec_Aggregation) Size() (n int) {
 	}
 	if len(m.Arguments) > 0 {
 		for _, e := range m.Arguments {
-			l = e.Size()
-			n += 1 + l + sovProcessorsSql(uint64(l))
-		}
-	}
-	return n
-}
-
-func (m *InterleavedReaderJoinerSpec) Size() (n int) {
-	if m == nil {
-		return 0
-	}
-	var l int
-	_ = l
-	if len(m.Tables) > 0 {
-		for _, e := range m.Tables {
-			l = e.Size()
-			n += 1 + l + sovProcessorsSql(uint64(l))
-		}
-	}
-	n += 2
-	n += 1 + sovProcessorsSql(uint64(m.LimitHint))
-	l = m.OnExpr.Size()
-	n += 1 + l + sovProcessorsSql(uint64(l))
-	n += 1 + sovProcessorsSql(uint64(m.Type))
-	n += 1 + sovProcessorsSql(uint64(m.LockingStrength))
-	n += 1 + sovProcessorsSql(uint64(m.LockingWaitPolicy))
-	return n
-}
-
-func (m *InterleavedReaderJoinerSpec_Table) Size() (n int) {
-	if m == nil {
-		return 0
-	}
-	var l int
-	_ = l
-	l = m.Desc.Size()
-	n += 1 + l + sovProcessorsSql(uint64(l))
-	n += 1 + sovProcessorsSql(uint64(m.IndexIdx))
-	l = m.Post.Size()
-	n += 1 + l + sovProcessorsSql(uint64(l))
-	l = m.Ordering.Size()
-	n += 1 + l + sovProcessorsSql(uint64(l))
-	if len(m.Spans) > 0 {
-		for _, e := range m.Spans {
 			l = e.Size()
 			n += 1 + l + sovProcessorsSql(uint64(l))
 		}
@@ -3930,9 +3966,29 @@ func (m *TableReaderSpec) Unmarshal(dAtA []byte) error {
 				}
 			}
 			m.Parallelize = bool(v != 0)
-		case 13:
+		case 14:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field HasSystemColumns", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.HasSystemColumns = bool(v != 0)
+		case 15:
 			if wireType == 0 {
-				var v descpb.SystemColumnKind
+				var v uint32
 				for shift := uint(0); ; shift += 7 {
 					if shift >= 64 {
 						return ErrIntOverflowProcessorsSql
@@ -3942,12 +3998,12 @@ func (m *TableReaderSpec) Unmarshal(dAtA []byte) error {
 					}
 					b := dAtA[iNdEx]
 					iNdEx++
-					v |= (descpb.SystemColumnKind(b) & 0x7F) << shift
+					v |= (uint32(b) & 0x7F) << shift
 					if b < 0x80 {
 						break
 					}
 				}
-				m.SystemColumns = append(m.SystemColumns, v)
+				m.NeededColumns = append(m.NeededColumns, v)
 			} else if wireType == 2 {
 				var packedLen int
 				for shift := uint(0); ; shift += 7 {
@@ -3972,11 +4028,18 @@ func (m *TableReaderSpec) Unmarshal(dAtA []byte) error {
 					return io.ErrUnexpectedEOF
 				}
 				var elementCount int
-				if elementCount != 0 && len(m.SystemColumns) == 0 {
-					m.SystemColumns = make([]descpb.SystemColumnKind, 0, elementCount)
+				var count int
+				for _, integer := range dAtA {
+					if integer < 128 {
+						count++
+					}
+				}
+				elementCount = count
+				if elementCount != 0 && len(m.NeededColumns) == 0 {
+					m.NeededColumns = make([]uint32, 0, elementCount)
 				}
 				for iNdEx < postIndex {
-					var v descpb.SystemColumnKind
+					var v uint32
 					for shift := uint(0); ; shift += 7 {
 						if shift >= 64 {
 							return ErrIntOverflowProcessorsSql
@@ -3986,16 +4049,96 @@ func (m *TableReaderSpec) Unmarshal(dAtA []byte) error {
 						}
 						b := dAtA[iNdEx]
 						iNdEx++
-						v |= (descpb.SystemColumnKind(b) & 0x7F) << shift
+						v |= (uint32(b) & 0x7F) << shift
 						if b < 0x80 {
 							break
 						}
 					}
-					m.SystemColumns = append(m.SystemColumns, v)
+					m.NeededColumns = append(m.NeededColumns, v)
 				}
 			} else {
-				return fmt.Errorf("proto: wrong wireType = %d for field SystemColumns", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field NeededColumns", wireType)
 			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProcessorsSql(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProcessorsSql
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *FiltererSpec) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProcessorsSql
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: FiltererSpec: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: FiltererSpec: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Filter", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthProcessorsSql
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.Filter.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipProcessorsSql(dAtA[iNdEx:])
@@ -4521,72 +4664,66 @@ func (m *JoinReaderSpec) Unmarshal(dAtA []byte) error {
 				}
 			}
 			m.MaintainOrdering = bool(v != 0)
-		case 12:
-			if wireType == 0 {
-				var v descpb.SystemColumnKind
-				for shift := uint(0); ; shift += 7 {
-					if shift >= 64 {
-						return ErrIntOverflowProcessorsSql
-					}
-					if iNdEx >= l {
-						return io.ErrUnexpectedEOF
-					}
-					b := dAtA[iNdEx]
-					iNdEx++
-					v |= (descpb.SystemColumnKind(b) & 0x7F) << shift
-					if b < 0x80 {
-						break
-					}
+		case 13:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field HasSystemColumns", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
 				}
-				m.SystemColumns = append(m.SystemColumns, v)
-			} else if wireType == 2 {
-				var packedLen int
-				for shift := uint(0); ; shift += 7 {
-					if shift >= 64 {
-						return ErrIntOverflowProcessorsSql
-					}
-					if iNdEx >= l {
-						return io.ErrUnexpectedEOF
-					}
-					b := dAtA[iNdEx]
-					iNdEx++
-					packedLen |= (int(b) & 0x7F) << shift
-					if b < 0x80 {
-						break
-					}
-				}
-				if packedLen < 0 {
-					return ErrInvalidLengthProcessorsSql
-				}
-				postIndex := iNdEx + packedLen
-				if postIndex > l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				var elementCount int
-				if elementCount != 0 && len(m.SystemColumns) == 0 {
-					m.SystemColumns = make([]descpb.SystemColumnKind, 0, elementCount)
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
 				}
-				for iNdEx < postIndex {
-					var v descpb.SystemColumnKind
-					for shift := uint(0); ; shift += 7 {
-						if shift >= 64 {
-							return ErrIntOverflowProcessorsSql
-						}
-						if iNdEx >= l {
-							return io.ErrUnexpectedEOF
-						}
-						b := dAtA[iNdEx]
-						iNdEx++
-						v |= (descpb.SystemColumnKind(b) & 0x7F) << shift
-						if b < 0x80 {
-							break
-						}
-					}
-					m.SystemColumns = append(m.SystemColumns, v)
-				}
-			} else {
-				return fmt.Errorf("proto: wrong wireType = %d for field SystemColumns", wireType)
 			}
+			m.HasSystemColumns = bool(v != 0)
+		case 14:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field LeftJoinWithPairedJoiner", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.LeftJoinWithPairedJoiner = bool(v != 0)
+		case 15:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field OutputGroupContinuationForLeftRow", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.OutputGroupContinuationForLeftRow = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := skipProcessorsSql(dAtA[iNdEx:])
@@ -5710,26 +5847,6 @@ func (m *HashJoinerSpec) Unmarshal(dAtA []byte) error {
 					break
 				}
 			}
-		case 7:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field MergedColumns", wireType)
-			}
-			var v int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				v |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			m.MergedColumns = bool(v != 0)
 		case 8:
 			if wireType != 0 {
 				return fmt.Errorf("proto: wrong wireType = %d for field LeftEqColumnsAreKey", wireType)
@@ -5948,6 +6065,46 @@ func (m *InvertedJoinerSpec) Unmarshal(dAtA []byte) error {
 					break
 				}
 			}
+		case 7:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MaintainOrdering", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.MaintainOrdering = bool(v != 0)
+		case 8:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field OutputGroupContinuationForLeftRow", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.OutputGroupContinuationForLeftRow = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := skipProcessorsSql(dAtA[iNdEx:])
@@ -6044,6 +6201,152 @@ func (m *InvertedFiltererSpec) Unmarshal(dAtA []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			if err := m.InvertedExpr.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field PreFiltererSpec", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthProcessorsSql
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.PreFiltererSpec == nil {
+				m.PreFiltererSpec = &InvertedFiltererSpec_PreFiltererSpec{}
+			}
+			if err := m.PreFiltererSpec.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProcessorsSql(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProcessorsSql
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *InvertedFiltererSpec_PreFiltererSpec) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProcessorsSql
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: PreFiltererSpec: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: PreFiltererSpec: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Expression", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthProcessorsSql
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.Expression.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Type", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProcessorsSql
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthProcessorsSql
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.Type == nil {
+				m.Type = &types.T{}
+			}
+			if err := m.Type.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -6503,403 +6806,6 @@ func (m *AggregatorSpec_Aggregation) Unmarshal(dAtA []byte) error {
 			}
 			m.Arguments = append(m.Arguments, Expression{})
 			if err := m.Arguments[len(m.Arguments)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		default:
-			iNdEx = preIndex
-			skippy, err := skipProcessorsSql(dAtA[iNdEx:])
-			if err != nil {
-				return err
-			}
-			if skippy < 0 {
-				return ErrInvalidLengthProcessorsSql
-			}
-			if (iNdEx + skippy) > l {
-				return io.ErrUnexpectedEOF
-			}
-			iNdEx += skippy
-		}
-	}
-
-	if iNdEx > l {
-		return io.ErrUnexpectedEOF
-	}
-	return nil
-}
-func (m *InterleavedReaderJoinerSpec) Unmarshal(dAtA []byte) error {
-	l := len(dAtA)
-	iNdEx := 0
-	for iNdEx < l {
-		preIndex := iNdEx
-		var wire uint64
-		for shift := uint(0); ; shift += 7 {
-			if shift >= 64 {
-				return ErrIntOverflowProcessorsSql
-			}
-			if iNdEx >= l {
-				return io.ErrUnexpectedEOF
-			}
-			b := dAtA[iNdEx]
-			iNdEx++
-			wire |= (uint64(b) & 0x7F) << shift
-			if b < 0x80 {
-				break
-			}
-		}
-		fieldNum := int32(wire >> 3)
-		wireType := int(wire & 0x7)
-		if wireType == 4 {
-			return fmt.Errorf("proto: InterleavedReaderJoinerSpec: wiretype end group for non-group")
-		}
-		if fieldNum <= 0 {
-			return fmt.Errorf("proto: InterleavedReaderJoinerSpec: illegal tag %d (wire type %d)", fieldNum, wire)
-		}
-		switch fieldNum {
-		case 1:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Tables", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthProcessorsSql
-			}
-			postIndex := iNdEx + msglen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			m.Tables = append(m.Tables, InterleavedReaderJoinerSpec_Table{})
-			if err := m.Tables[len(m.Tables)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 2:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Reverse", wireType)
-			}
-			var v int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				v |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			m.Reverse = bool(v != 0)
-		case 3:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field LimitHint", wireType)
-			}
-			m.LimitHint = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.LimitHint |= (int64(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 4:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field OnExpr", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthProcessorsSql
-			}
-			postIndex := iNdEx + msglen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if err := m.OnExpr.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 5:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Type", wireType)
-			}
-			m.Type = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.Type |= (descpb.JoinType(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 6:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field LockingStrength", wireType)
-			}
-			m.LockingStrength = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.LockingStrength |= (descpb.ScanLockingStrength(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 7:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field LockingWaitPolicy", wireType)
-			}
-			m.LockingWaitPolicy = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.LockingWaitPolicy |= (descpb.ScanLockingWaitPolicy(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		default:
-			iNdEx = preIndex
-			skippy, err := skipProcessorsSql(dAtA[iNdEx:])
-			if err != nil {
-				return err
-			}
-			if skippy < 0 {
-				return ErrInvalidLengthProcessorsSql
-			}
-			if (iNdEx + skippy) > l {
-				return io.ErrUnexpectedEOF
-			}
-			iNdEx += skippy
-		}
-	}
-
-	if iNdEx > l {
-		return io.ErrUnexpectedEOF
-	}
-	return nil
-}
-func (m *InterleavedReaderJoinerSpec_Table) Unmarshal(dAtA []byte) error {
-	l := len(dAtA)
-	iNdEx := 0
-	for iNdEx < l {
-		preIndex := iNdEx
-		var wire uint64
-		for shift := uint(0); ; shift += 7 {
-			if shift >= 64 {
-				return ErrIntOverflowProcessorsSql
-			}
-			if iNdEx >= l {
-				return io.ErrUnexpectedEOF
-			}
-			b := dAtA[iNdEx]
-			iNdEx++
-			wire |= (uint64(b) & 0x7F) << shift
-			if b < 0x80 {
-				break
-			}
-		}
-		fieldNum := int32(wire >> 3)
-		wireType := int(wire & 0x7)
-		if wireType == 4 {
-			return fmt.Errorf("proto: Table: wiretype end group for non-group")
-		}
-		if fieldNum <= 0 {
-			return fmt.Errorf("proto: Table: illegal tag %d (wire type %d)", fieldNum, wire)
-		}
-		switch fieldNum {
-		case 1:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Desc", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthProcessorsSql
-			}
-			postIndex := iNdEx + msglen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if err := m.Desc.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 2:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field IndexIdx", wireType)
-			}
-			m.IndexIdx = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.IndexIdx |= (uint32(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 3:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Post", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthProcessorsSql
-			}
-			postIndex := iNdEx + msglen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if err := m.Post.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 4:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Ordering", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthProcessorsSql
-			}
-			postIndex := iNdEx + msglen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if err := m.Ordering.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 5:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Spans", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProcessorsSql
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthProcessorsSql
-			}
-			postIndex := iNdEx + msglen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			m.Spans = append(m.Spans, TableReaderSpan{})
-			if err := m.Spans[len(m.Spans)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -8093,179 +7999,190 @@ var (
 )
 
 func init() {
-	proto.RegisterFile("sql/execinfrapb/processors_sql.proto", fileDescriptor_processors_sql_1877ce89820fdbbd)
+	proto.RegisterFile("sql/execinfrapb/processors_sql.proto", fileDescriptor_processors_sql_0901999adc18b9c0)
 }
 
-var fileDescriptor_processors_sql_1877ce89820fdbbd = []byte{
-	// 2712 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xd4, 0x5a, 0x4b, 0x73, 0xdb, 0xd6,
-	0xf5, 0x17, 0xf8, 0x90, 0xc8, 0xc3, 0x87, 0xae, 0xaf, 0x95, 0x98, 0x51, 0xfe, 0x7f, 0x59, 0x66,
-	0xd2, 0x58, 0x76, 0x1c, 0xa9, 0x51, 0x3b, 0xe9, 0x24, 0xe9, 0x22, 0x10, 0x09, 0xca, 0x94, 0x29,
-	0x40, 0x06, 0x49, 0x39, 0x8f, 0x99, 0x60, 0x20, 0xe2, 0x8a, 0x42, 0x0c, 0x02, 0x14, 0x00, 0x5a,
-	0x52, 0xbe, 0x40, 0xb7, 0xed, 0x74, 0xd3, 0x55, 0x26, 0x9b, 0xf6, 0x13, 0x74, 0x9d, 0x6e, 0xba,
-	0xf0, 0x32, 0xd3, 0x99, 0xb6, 0x59, 0x75, 0x1a, 0xe7, 0x13, 0x74, 0x95, 0xe9, 0xae, 0x73, 0x1f,
-	0x80, 0x40, 0x8e, 0xe8, 0x9a, 0xb6, 0x13, 0x4f, 0x37, 0x1a, 0xde, 0xf3, 0xba, 0xe7, 0x9e, 0x73,
-	0xee, 0xb9, 0xbf, 0x7b, 0x21, 0x78, 0x3d, 0x38, 0x76, 0x36, 0xc8, 0x29, 0xe9, 0xd9, 0xee, 0xa1,
-	0x6f, 0x0e, 0x0f, 0x36, 0x86, 0xbe, 0xd7, 0x23, 0x41, 0xe0, 0xf9, 0x81, 0x11, 0x1c, 0x3b, 0xeb,
-	0x43, 0xdf, 0x0b, 0x3d, 0x5c, 0xe9, 0x79, 0xbd, 0xfb, 0xbe, 0x67, 0xf6, 0x8e, 0xd6, 0x29, 0xd1,
-	0xb2, 0x83, 0x30, 0x38, 0x76, 0xfc, 0x91, 0xbb, 0xfc, 0x1a, 0xd5, 0xef, 0x99, 0xa1, 0xe9, 0x78,
-	0xfd, 0x0d, 0x8b, 0x04, 0xbd, 0xe1, 0xc1, 0x46, 0x10, 0xfa, 0xa3, 0x5e, 0x38, 0xf2, 0x89, 0xc5,
-	0xd5, 0x97, 0xab, 0x17, 0x08, 0x7d, 0xe6, 0xd9, 0xae, 0x11, 0x9e, 0x0d, 0x89, 0x90, 0x59, 0xbd,
-	0x40, 0xc6, 0xf1, 0x7a, 0xf7, 0x6d, 0xb7, 0x2f, 0x24, 0x5e, 0xa2, 0x12, 0x54, 0x23, 0xe0, 0x7f,
-	0x05, 0x79, 0x79, 0x72, 0x05, 0x96, 0x19, 0x9a, 0x82, 0xf7, 0x93, 0xc7, 0xac, 0xee, 0xc0, 0x0c,
-	0xa2, 0xb9, 0x6f, 0x52, 0x31, 0x6f, 0x18, 0x6e, 0xd8, 0xee, 0x03, 0xe2, 0x87, 0xc4, 0x22, 0xa7,
-	0x43, 0x7f, 0x23, 0x18, 0x9a, 0xae, 0x41, 0x7f, 0x91, 0x20, 0xb0, 0x3d, 0x57, 0xc8, 0x2e, 0xf5,
-	0xbd, 0xbe, 0xc7, 0x7e, 0x6e, 0xd0, 0x5f, 0x9c, 0x5a, 0xfd, 0xad, 0x04, 0xe5, 0x7d, 0xd3, 0x19,
-	0x91, 0xa0, 0xe6, 0xf9, 0xa4, 0x3d, 0x24, 0x3d, 0x5c, 0x83, 0x85, 0x9e, 0xe7, 0x8c, 0x06, 0x6e,
-	0x50, 0x91, 0x56, 0xd3, 0x6b, 0x85, 0xcd, 0xd7, 0xd6, 0xa7, 0x45, 0x71, 0xbd, 0x6e, 0x86, 0xa3,
-	0x41, 0xd3, 0x3d, 0xf4, 0xb6, 0x32, 0x0f, 0xff, 0x71, 0x75, 0x4e, 0x8f, 0x34, 0xf1, 0xab, 0x90,
-	0xf7, 0xcd, 0x13, 0xe3, 0xe0, 0x2c, 0x24, 0x41, 0x25, 0xb5, 0x9a, 0x5e, 0x2b, 0xea, 0x39, 0xdf,
-	0x3c, 0xd9, 0xa2, 0x63, 0x7c, 0x15, 0x72, 0xee, 0x68, 0x60, 0xf8, 0xde, 0x49, 0x50, 0x49, 0xaf,
-	0x4a, 0x6b, 0x99, 0x48, 0xdb, 0x1d, 0x0d, 0x74, 0xef, 0x24, 0xa8, 0xfe, 0x2b, 0x0b, 0x8b, 0x1d,
-	0xf3, 0xc0, 0x21, 0x3a, 0x31, 0x2d, 0xe2, 0x33, 0xb7, 0xb6, 0x20, 0x1b, 0x52, 0x52, 0x45, 0x5a,
-	0x95, 0xd6, 0x0a, 0x9b, 0x6f, 0x4c, 0x38, 0x15, 0x1c, 0x3b, 0x2c, 0x30, 0x4c, 0xad, 0x4e, 0x82,
-	0x9e, 0x6f, 0x0f, 0x43, 0xcf, 0x17, 0x96, 0xb9, 0x2a, 0xbe, 0x06, 0x79, 0xdb, 0xb5, 0xc8, 0xa9,
-	0x61, 0x5b, 0xa7, 0x95, 0xd4, 0xaa, 0xb4, 0x56, 0x12, 0xfc, 0x1c, 0x23, 0x37, 0xad, 0x53, 0xbc,
-	0x02, 0x0b, 0x3e, 0x79, 0x40, 0xfc, 0x80, 0x30, 0xd7, 0x72, 0x91, 0x6b, 0x82, 0x88, 0x15, 0xc8,
-	0xd2, 0xf8, 0x06, 0x95, 0x0c, 0x8b, 0xcd, 0x8d, 0xe9, 0xb1, 0x19, 0x5b, 0x80, 0xe9, 0x46, 0x9e,
-	0x30, 0x6d, 0xfc, 0x1a, 0x80, 0x63, 0x0f, 0xec, 0xd0, 0x38, 0xb2, 0xdd, 0xb0, 0x92, 0x5d, 0x95,
-	0xd6, 0xd2, 0x42, 0x20, 0xcf, 0xe8, 0xb7, 0x6d, 0x37, 0xa4, 0x71, 0xb2, 0x03, 0xa3, 0x77, 0x44,
-	0x7a, 0xf7, 0x2b, 0xf3, 0x49, 0x67, 0xec, 0xa0, 0x46, 0x89, 0x58, 0x05, 0x78, 0x60, 0x07, 0xf6,
-	0x81, 0xed, 0xd8, 0xe1, 0x59, 0x65, 0x61, 0x55, 0x5a, 0x2b, 0x6f, 0xae, 0x4d, 0xf7, 0xa8, 0xdd,
-	0x33, 0xdd, 0xfd, 0x58, 0x5e, 0x18, 0x4b, 0x58, 0xc0, 0xef, 0xc3, 0x95, 0x81, 0x79, 0x6a, 0x84,
-	0xf6, 0x80, 0x04, 0xa1, 0x39, 0x18, 0x1a, 0x66, 0x9f, 0x18, 0xae, 0xe9, 0x7a, 0x41, 0x25, 0x9f,
-	0xc8, 0xd3, 0xd2, 0xc0, 0x3c, 0xed, 0x44, 0x32, 0x72, 0x9f, 0xa8, 0x54, 0x02, 0x7f, 0x02, 0x48,
-	0xd4, 0xbd, 0x11, 0x84, 0x3e, 0x71, 0xfb, 0xe1, 0x51, 0x05, 0x98, 0x4b, 0x37, 0xa7, 0xe4, 0x8a,
-	0xfa, 0xd3, 0xe2, 0x2a, 0x6d, 0xa1, 0x21, 0x66, 0x58, 0x74, 0xc6, 0xc9, 0xf8, 0x00, 0x2e, 0x47,
-	0xc6, 0x4f, 0x4c, 0x3b, 0x34, 0x86, 0x9e, 0x63, 0xf7, 0xce, 0x2a, 0x05, 0x66, 0xff, 0xd6, 0x7f,
-	0xb7, 0x7f, 0xcf, 0xb4, 0xc3, 0x3d, 0xa6, 0x23, 0x66, 0xb8, 0xe4, 0x4c, 0x32, 0xf0, 0x1b, 0x50,
-	0x18, 0x9a, 0xbe, 0xe9, 0x38, 0xc4, 0xb1, 0x3f, 0x27, 0x95, 0x62, 0x22, 0xe2, 0x49, 0x06, 0x56,
-	0xa1, 0x1c, 0x9c, 0x05, 0x21, 0x19, 0x18, 0xd1, 0x3e, 0x29, 0xad, 0xa6, 0xd7, 0xca, 0x9b, 0xd7,
-	0xa7, 0xb9, 0xc1, 0x84, 0x6b, 0x4c, 0xf6, 0x8e, 0xed, 0x5a, 0x7a, 0x29, 0x48, 0x50, 0x82, 0x9d,
-	0x4c, 0x2e, 0x87, 0xf2, 0xd5, 0x7f, 0xa7, 0xa1, 0xd2, 0xa4, 0x55, 0xd8, 0xbe, 0x6f, 0x0f, 0x5f,
-	0x50, 0xf1, 0xc7, 0xc5, 0x9d, 0x7e, 0xa6, 0xe2, 0x1e, 0x2f, 0xcb, 0xcc, 0x33, 0x97, 0x65, 0x62,
-	0x4f, 0x66, 0x2f, 0xda, 0x93, 0x17, 0x55, 0xde, 0xfc, 0x0f, 0x5c, 0x79, 0x0b, 0xcf, 0xb1, 0xf2,
-	0xaa, 0xdf, 0x67, 0xa1, 0xbc, 0xe3, 0xd9, 0xee, 0x8f, 0x9f, 0xf1, 0x1b, 0x50, 0x76, 0x3c, 0xef,
-	0xfe, 0x68, 0x18, 0xd7, 0x32, 0x4d, 0x7d, 0x69, 0x2b, 0x85, 0x24, 0xbd, 0xc4, 0x39, 0xa2, 0x4c,
-	0xe9, 0xb9, 0xe0, 0xf1, 0x73, 0x85, 0xa5, 0xb4, 0xb0, 0xf9, 0xfa, 0xf4, 0x94, 0x2a, 0xf1, 0xe9,
-	0x23, 0x66, 0x9c, 0xf7, 0x5c, 0x4a, 0xc3, 0xef, 0x42, 0x86, 0x9e, 0x81, 0x22, 0x3d, 0x57, 0xa7,
-	0xac, 0x8a, 0xc6, 0xa2, 0x73, 0x36, 0x24, 0x42, 0x99, 0xa9, 0x3c, 0xf7, 0x66, 0xf7, 0x2e, 0xbc,
-	0x3c, 0xbe, 0x74, 0xc3, 0xf4, 0x89, 0x71, 0x9f, 0x9c, 0x55, 0x72, 0x89, 0x22, 0xbb, 0x3c, 0x16,
-	0x04, 0xd9, 0x27, 0x77, 0xc8, 0xd9, 0x85, 0x05, 0x97, 0xff, 0x81, 0x0b, 0x0e, 0x9e, 0x67, 0xab,
-	0x7b, 0x1b, 0x2e, 0x0d, 0x4c, 0xdb, 0x0d, 0x4d, 0xdb, 0x35, 0x3c, 0xdf, 0x22, 0xbe, 0xed, 0xf6,
-	0x59, 0x33, 0x8d, 0x96, 0x8d, 0x22, 0xb6, 0x26, 0xb8, 0x17, 0x74, 0xbd, 0xe2, 0x33, 0x76, 0xbd,
-	0x2c, 0x9a, 0xa7, 0xf8, 0x03, 0xda, 0x9e, 0x1f, 0x8a, 0xaa, 0xbf, 0x0b, 0x8b, 0xde, 0x28, 0x1c,
-	0x8e, 0xc2, 0x73, 0xaf, 0x78, 0xfd, 0x57, 0xa7, 0x27, 0x3a, 0xf2, 0x50, 0x78, 0x5e, 0xe6, 0x06,
-	0x62, 0xbf, 0x37, 0x01, 0x47, 0xb6, 0x8c, 0x81, 0x19, 0xf6, 0x8e, 0x0c, 0x87, 0xb8, 0x63, 0xbb,
-	0x01, 0x45, 0xfc, 0x5d, 0xca, 0x6e, 0x11, 0xb7, 0xfa, 0x95, 0x04, 0xc5, 0xba, 0x1d, 0x84, 0xb6,
-	0xdb, 0x0b, 0x99, 0x5f, 0xd7, 0x61, 0x91, 0x09, 0x11, 0xcb, 0x48, 0x62, 0xa3, 0x92, 0x5e, 0x16,
-	0xe4, 0x68, 0x93, 0xdc, 0x00, 0x64, 0x09, 0xc5, 0x58, 0x32, 0xc5, 0x24, 0x17, 0x23, 0x7a, 0x24,
-	0xba, 0x09, 0xd8, 0x1d, 0x39, 0x0e, 0x2f, 0xbb, 0x88, 0x39, 0x06, 0x3a, 0x10, 0xe3, 0xcb, 0x3e,
-	0x89, 0x7c, 0xc1, 0x6f, 0x40, 0x91, 0xf8, 0xbe, 0xe7, 0x1b, 0x9e, 0x6b, 0x58, 0xa3, 0x21, 0xdb,
-	0x88, 0xf9, 0xa8, 0xb6, 0x19, 0x47, 0x73, 0xeb, 0xa3, 0x61, 0x15, 0x41, 0x59, 0xf3, 0x2d, 0xdb,
-	0x35, 0x69, 0xa5, 0xd3, 0x15, 0x54, 0x7f, 0x97, 0x06, 0xf4, 0xb1, 0xdd, 0xff, 0xdc, 0xec, 0xd3,
-	0xcd, 0x25, 0xc2, 0x5d, 0x87, 0x79, 0xd6, 0x29, 0x22, 0xa4, 0x37, 0x5b, 0x97, 0x11, 0xba, 0xb8,
-	0x01, 0x40, 0x8e, 0xc7, 0x56, 0x5b, 0xd8, 0xbc, 0x36, 0x3d, 0x5f, 0x62, 0xfd, 0x11, 0xdc, 0x21,
-	0xc7, 0xe7, 0xb1, 0x2b, 0xf3, 0x76, 0xe5, 0x71, 0xd7, 0xc7, 0x7a, 0x11, 0xe3, 0x88, 0x35, 0x3d,
-	0xa7, 0x5e, 0x74, 0x07, 0x8a, 0x87, 0xf6, 0x29, 0xb1, 0x8c, 0x07, 0x0c, 0x00, 0x57, 0xb2, 0xcc,
-	0xf3, 0xc7, 0xb4, 0x94, 0x71, 0xa0, 0xac, 0x17, 0x98, 0x36, 0x27, 0x3e, 0x43, 0x63, 0xab, 0xfe,
-	0x2d, 0x0d, 0x8b, 0xbb, 0xc4, 0xef, 0x93, 0x44, 0x66, 0x76, 0xa1, 0xe4, 0x90, 0xc3, 0x67, 0xd8,
-	0x06, 0x45, 0xaa, 0x1e, 0x6f, 0x02, 0x0d, 0xca, 0xbe, 0xdd, 0x3f, 0x4a, 0xd8, 0x4b, 0xcd, 0x68,
-	0xaf, 0xc4, 0xf4, 0x63, 0x83, 0x89, 0x04, 0x64, 0x5f, 0xc4, 0x61, 0x70, 0x03, 0x4a, 0x74, 0x73,
-	0x18, 0xe4, 0x78, 0x64, 0xc6, 0xe7, 0x41, 0xb4, 0x6f, 0x8a, 0x94, 0xa5, 0x08, 0x0e, 0x7e, 0x0f,
-	0xae, 0xb0, 0x50, 0x9e, 0xd7, 0xe8, 0x94, 0x46, 0x4f, 0x0e, 0x43, 0xe5, 0x78, 0xbc, 0xd1, 0xff,
-	0x12, 0x2a, 0x3c, 0x6e, 0x17, 0x28, 0xe7, 0x13, 0xca, 0x4b, 0x4c, 0x6a, 0x42, 0xbb, 0xfa, 0x9b,
-	0x34, 0x94, 0x6f, 0x9b, 0xc1, 0x51, 0x22, 0xaf, 0x37, 0x61, 0x71, 0xc2, 0x19, 0xde, 0x48, 0xc4,
-	0x81, 0x9b, 0x74, 0x01, 0xdf, 0x02, 0x34, 0x39, 0x39, 0xef, 0x25, 0x4c, 0xb8, 0x3c, 0x3e, 0xe5,
-	0x0b, 0xcf, 0xc8, 0x9b, 0x50, 0x1e, 0xd0, 0x22, 0x3e, 0xef, 0x90, 0xc9, 0x94, 0x94, 0x38, 0x2f,
-	0x72, 0xf6, 0xc5, 0xe5, 0xe4, 0x2f, 0x29, 0xc0, 0x4d, 0x71, 0x5b, 0x4e, 0xe4, 0xe5, 0x47, 0x82,
-	0x5b, 0x1a, 0x94, 0xa2, 0xab, 0xfa, 0xd3, 0x76, 0xaf, 0x62, 0x64, 0x80, 0x25, 0xec, 0x05, 0x67,
-	0x7d, 0x27, 0x93, 0x4b, 0xa3, 0x4c, 0xf5, 0x0f, 0x12, 0x2c, 0x45, 0x41, 0x6d, 0xd8, 0x4e, 0x48,
-	0x7c, 0x11, 0xd6, 0x75, 0x40, 0xf1, 0x7a, 0x7b, 0x9e, 0xc3, 0x22, 0x23, 0x25, 0x22, 0x53, 0x8e,
-	0xb8, 0x35, 0xcf, 0xa1, 0xf1, 0xf9, 0x74, 0x32, 0x3e, 0xbc, 0x4d, 0xfd, 0x6c, 0xc2, 0x25, 0x6f,
-	0x18, 0xae, 0x27, 0x9f, 0x3c, 0xd6, 0xe9, 0x1d, 0xe4, 0x7c, 0x79, 0x7b, 0xbe, 0x17, 0x7a, 0x17,
-	0x85, 0xab, 0xfa, 0x45, 0x0e, 0xca, 0x72, 0xbf, 0xef, 0x93, 0xbe, 0x19, 0x7a, 0xdc, 0xc5, 0x6b,
-	0x00, 0x7d, 0xdf, 0xe3, 0x28, 0x30, 0xb9, 0xbf, 0xf2, 0x8c, 0x5a, 0xf3, 0x9c, 0x00, 0x7f, 0x0a,
-	0x45, 0x53, 0x28, 0xd9, 0x5e, 0x7c, 0x3b, 0xfa, 0xf9, 0xf4, 0x48, 0x8f, 0x4f, 0x11, 0x0f, 0x13,
-	0x49, 0x4c, 0xda, 0xc3, 0x3f, 0x15, 0x10, 0x85, 0x58, 0x46, 0xc2, 0x95, 0x4c, 0xec, 0x0a, 0x12,
-	0xdc, 0xed, 0xd8, 0xa3, 0x6d, 0x91, 0xb1, 0x2c, 0xcb, 0xd8, 0x5b, 0x4f, 0xec, 0xc9, 0x64, 0xfe,
-	0x96, 0x7f, 0x95, 0x82, 0x42, 0xc2, 0x3d, 0x6a, 0xf8, 0x70, 0xe4, 0xf6, 0x58, 0x92, 0x66, 0x31,
-	0xdc, 0x18, 0xb9, 0xbd, 0xc8, 0x30, 0x35, 0x80, 0x57, 0x21, 0x17, 0x63, 0x9a, 0x54, 0x62, 0x57,
-	0xc6, 0x54, 0xfc, 0x3a, 0x94, 0x0f, 0x59, 0xad, 0xc4, 0x95, 0x41, 0x37, 0x43, 0x49, 0x2f, 0x72,
-	0xaa, 0xa8, 0x88, 0x2b, 0xec, 0x35, 0x8a, 0xb1, 0xb3, 0x0c, 0x47, 0xcd, 0xf7, 0x38, 0xe3, 0x36,
-	0xe4, 0x4d, 0xbf, 0x3f, 0x1a, 0x10, 0x37, 0x0c, 0x2a, 0xf3, 0x2c, 0x23, 0xb3, 0xd4, 0xfe, 0xb9,
-	0xb2, 0xa8, 0xe1, 0xbf, 0xa6, 0x21, 0x43, 0x57, 0x81, 0x11, 0x14, 0x65, 0xf5, 0x23, 0x43, 0xd5,
-	0x3a, 0x86, 0xda, 0x6d, 0xb5, 0xd0, 0x1c, 0x5e, 0x80, 0xb4, 0xbc, 0xbf, 0x8d, 0x24, 0x5c, 0x84,
-	0xdc, 0x96, 0xa6, 0xb5, 0x0c, 0x59, 0xad, 0xa3, 0x14, 0x2e, 0xc0, 0x02, 0x1b, 0x69, 0x3a, 0x4a,
-	0xe3, 0x32, 0x40, 0x4d, 0x53, 0x6b, 0x72, 0xc7, 0x90, 0xb7, 0xb7, 0x51, 0x06, 0xe7, 0x21, 0x5b,
-	0xd3, 0xba, 0x6a, 0x07, 0x65, 0xa9, 0xfa, 0xae, 0xfc, 0x21, 0x5a, 0x60, 0x3f, 0x9a, 0x2a, 0xca,
-	0x61, 0x80, 0xf9, 0x76, 0xa7, 0x5e, 0x57, 0xf6, 0x51, 0x9e, 0x12, 0xdb, 0xdd, 0x5d, 0x04, 0xd4,
-	0x5c, 0xbb, 0xbb, 0x6b, 0x34, 0xd5, 0x0e, 0x2a, 0xd0, 0x99, 0xf6, 0x65, 0xbd, 0x29, 0xab, 0x35,
-	0x05, 0x15, 0x29, 0xeb, 0x43, 0x4d, 0x67, 0x96, 0x4b, 0x7c, 0xa6, 0xae, 0xda, 0x31, 0x74, 0xed,
-	0x5e, 0x1b, 0x95, 0x99, 0xde, 0x5d, 0xbd, 0xde, 0x6c, 0x34, 0xd0, 0x22, 0xc6, 0x50, 0x6e, 0x34,
-	0x55, 0xb9, 0x65, 0xc4, 0xda, 0x88, 0x2e, 0x88, 0xd3, 0xc4, 0x9c, 0x97, 0x70, 0x09, 0xf2, 0xb2,
-	0xae, 0xcb, 0x1f, 0x31, 0x8b, 0x98, 0x4e, 0xb6, 0xd3, 0xd6, 0x54, 0x36, 0xba, 0x4c, 0x99, 0x74,
-	0xb4, 0xc5, 0x86, 0x4b, 0x74, 0xba, 0x76, 0x47, 0x6f, 0xaa, 0xdb, 0x6c, 0xfc, 0x12, 0x5b, 0x75,
-	0xb3, 0xc3, 0x42, 0xf0, 0x32, 0x5d, 0x08, 0x1d, 0x68, 0x3a, 0xba, 0x82, 0x73, 0x90, 0xa9, 0x69,
-	0xba, 0x8e, 0x2a, 0xb8, 0x02, 0x4b, 0x7b, 0x8a, 0x5e, 0x53, 0xd4, 0x4e, 0xb3, 0xa5, 0x18, 0xf5,
-	0x66, 0xbb, 0x66, 0x34, 0x77, 0xf7, 0x5a, 0xe8, 0x95, 0x09, 0x4e, 0x4d, 0x53, 0x3b, 0x9c, 0xb3,
-	0x8c, 0x2f, 0xc3, 0x22, 0xf3, 0x41, 0xdb, 0xda, 0x51, 0x6a, 0x3c, 0x88, 0xaf, 0xe2, 0x25, 0x40,
-	0xdc, 0x95, 0x04, 0xf5, 0xff, 0xa8, 0x07, 0xfb, 0xb2, 0x6e, 0xec, 0x69, 0x7b, 0xe8, 0xff, 0xb9,
-	0x7b, 0x74, 0x59, 0x6c, 0xbc, 0x82, 0x17, 0xa1, 0xd0, 0xee, 0x18, 0xbb, 0xf2, 0x1d, 0xa5, 0xd5,
-	0x54, 0x15, 0x74, 0xb5, 0x7a, 0x0b, 0x32, 0xb4, 0xea, 0xa9, 0x7b, 0x72, 0xb7, 0xa3, 0xa1, 0x39,
-	0x16, 0xfd, 0x9a, 0xdc, 0x92, 0x75, 0x24, 0x51, 0x75, 0x55, 0x53, 0x0d, 0x31, 0x4e, 0x55, 0xff,
-	0x34, 0x0f, 0xaf, 0x36, 0xdd, 0x90, 0xf8, 0x0e, 0x31, 0x1f, 0x10, 0x8b, 0x5f, 0xc8, 0x13, 0xe7,
-	0xc4, 0x47, 0x13, 0x88, 0xf9, 0xfd, 0xe9, 0x25, 0xf7, 0x18, 0x33, 0xfc, 0x1c, 0x99, 0x80, 0xd1,
-	0x89, 0x57, 0x8e, 0xd4, 0x45, 0xaf, 0x1c, 0xe3, 0x4f, 0x86, 0xe9, 0x8b, 0x9f, 0x0c, 0x9f, 0xeb,
-	0x25, 0x3d, 0x3b, 0x3b, 0x0a, 0xf8, 0x5f, 0x7f, 0x8a, 0x59, 0xfe, 0x2a, 0x05, 0x59, 0x96, 0x1d,
-	0xfc, 0x01, 0x64, 0x2c, 0x12, 0xf4, 0x9e, 0x0a, 0x11, 0x30, 0xcd, 0x27, 0x01, 0x04, 0x35, 0xc8,
-	0x0c, 0xbd, 0x80, 0xa7, 0xf3, 0xb1, 0x0f, 0x6e, 0x7b, 0x5e, 0x10, 0xee, 0xf1, 0x8f, 0x00, 0xb4,
-	0x82, 0xa2, 0x79, 0xa8, 0x32, 0xae, 0x43, 0x2e, 0xc6, 0xf5, 0x99, 0x19, 0x71, 0x7d, 0xac, 0x79,
-	0xfe, 0xf8, 0x97, 0x7d, 0x96, 0xc7, 0xbf, 0xea, 0x9f, 0x25, 0x28, 0xef, 0xf9, 0xde, 0x67, 0xa4,
-	0x17, 0xb6, 0x09, 0xbf, 0x3d, 0x7f, 0x00, 0x59, 0x5a, 0x91, 0xd1, 0x9e, 0x99, 0xa5, 0x24, 0xb9,
-	0x22, 0xde, 0x86, 0x4b, 0x7d, 0xe2, 0x12, 0xdf, 0x0c, 0x13, 0xf8, 0x92, 0xdf, 0x34, 0x97, 0x27,
-	0x13, 0x43, 0x06, 0xeb, 0xfc, 0x33, 0x4b, 0x47, 0x47, 0xb1, 0x52, 0x04, 0x3c, 0xaf, 0x03, 0x72,
-	0x47, 0xec, 0x09, 0x23, 0x30, 0x86, 0xc4, 0x37, 0xfa, 0xc4, 0xe5, 0xb7, 0x4c, 0xbd, 0xe4, 0x8e,
-	0x06, 0xf4, 0x6c, 0xdd, 0x23, 0xfe, 0x36, 0x71, 0xab, 0xdf, 0x96, 0xa0, 0x78, 0xcf, 0x76, 0x2d,
-	0xef, 0x44, 0xec, 0xfc, 0x55, 0xf6, 0x3a, 0x1c, 0xda, 0xec, 0x14, 0x3f, 0x13, 0xd7, 0xff, 0x24,
-	0x09, 0xb7, 0x21, 0x7f, 0xc2, 0x34, 0x1a, 0xb1, 0x73, 0x1b, 0xd3, 0x97, 0x9a, 0x34, 0x2e, 0x06,
-	0x8d, 0xf8, 0x70, 0x8a, 0xed, 0x2c, 0xff, 0x51, 0x12, 0xc7, 0x52, 0x1b, 0x4a, 0x11, 0x68, 0x20,
-	0x8d, 0xa7, 0x3d, 0xa2, 0xf5, 0x71, 0x1b, 0xf8, 0x2e, 0x80, 0x98, 0x8a, 0x5a, 0x4c, 0x31, 0x8b,
-	0x6f, 0xcf, 0xe6, 0x33, 0xb5, 0x9a, 0x30, 0xf2, 0x5e, 0xe6, 0xe1, 0x97, 0x57, 0xa5, 0xe5, 0x2f,
-	0x17, 0x20, 0xdb, 0xf0, 0xcd, 0x01, 0xc1, 0x77, 0x20, 0x33, 0xf0, 0x2c, 0x22, 0xdc, 0x7d, 0x52,
-	0xe3, 0x4c, 0x77, 0x7d, 0xd7, 0xb3, 0xe2, 0xf6, 0x42, 0x8d, 0xe0, 0xbb, 0x30, 0x7f, 0xe0, 0x8d,
-	0x5c, 0x2b, 0x98, 0x02, 0x0c, 0x1f, 0x6f, 0x6e, 0x8b, 0xa9, 0x46, 0xcd, 0x8e, 0x1b, 0xc2, 0x1f,
-	0x43, 0x9e, 0x9c, 0xf6, 0x9c, 0x11, 0x2d, 0x3a, 0xb6, 0x0d, 0xcb, 0x9b, 0xef, 0xcc, 0x64, 0x55,
-	0x89, 0xb4, 0xe3, 0x17, 0x8d, 0x88, 0xb0, 0xfc, 0xbd, 0x04, 0x59, 0x36, 0x29, 0x9d, 0x85, 0xcd,
-	0x47, 0x1b, 0xa6, 0x08, 0xc5, 0x3b, 0xb3, 0xfb, 0x9e, 0x68, 0xb7, 0xe7, 0xe6, 0xe8, 0xc1, 0x60,
-	0xbb, 0xa1, 0xe1, 0x1d, 0x1e, 0x06, 0x84, 0x83, 0xad, 0xe8, 0x43, 0x4d, 0xde, 0x76, 0x43, 0x8d,
-	0x91, 0xf1, 0x35, 0x28, 0xd2, 0x5d, 0x61, 0x45, 0x62, 0x74, 0xa5, 0x45, 0xbd, 0xc0, 0x68, 0x42,
-	0x64, 0x07, 0x0a, 0x9c, 0xc9, 0x3e, 0x6f, 0x8a, 0x4e, 0x32, 0xc3, 0xc7, 0x3f, 0xe0, 0xda, 0xd4,
-	0xa7, 0xe5, 0x2f, 0x24, 0x98, 0xe7, 0xe1, 0xc6, 0x2a, 0x64, 0x83, 0xd0, 0xf4, 0x43, 0xd1, 0x48,
-	0x37, 0x67, 0x5f, 0x76, 0xdc, 0x60, 0xa8, 0x19, 0x5c, 0x87, 0x34, 0x71, 0x2d, 0x51, 0x00, 0x4f,
-	0x61, 0x4d, 0xa7, 0xea, 0xd5, 0xeb, 0x90, 0xa1, 0xd5, 0x45, 0x71, 0x9a, 0x2e, 0xab, 0xdb, 0x0a,
-	0x9a, 0xa3, 0x08, 0x81, 0x41, 0x2a, 0x89, 0x22, 0x84, 0x6d, 0x5d, 0xeb, 0xee, 0xb5, 0x51, 0xaa,
-	0xfa, 0x39, 0xe4, 0xe3, 0xd8, 0xe3, 0x2b, 0x70, 0xb9, 0xab, 0x6e, 0x69, 0x5d, 0xb5, 0xae, 0xd4,
-	0x8d, 0x3d, 0x5d, 0xa9, 0x29, 0xf5, 0xa6, 0xba, 0x8d, 0xe6, 0xc6, 0x19, 0x0d, 0xad, 0xd5, 0xd2,
-	0xee, 0x51, 0x86, 0x44, 0x21, 0x8c, 0xd6, 0x68, 0xb4, 0x95, 0x4e, 0x42, 0x3c, 0x95, 0xa0, 0x9e,
-	0xcb, 0xa6, 0x29, 0x76, 0xa9, 0x75, 0x75, 0x5d, 0xe1, 0xd8, 0x0e, 0x65, 0xaa, 0x9f, 0x40, 0x3e,
-	0xae, 0x2e, 0x0a, 0xe3, 0x54, 0xcd, 0x50, 0x3e, 0xac, 0xb5, 0xba, 0xed, 0xa6, 0xa6, 0xf2, 0x49,
-	0xd9, 0xb0, 0xae, 0x18, 0x49, 0x3d, 0x09, 0x5f, 0x82, 0x52, 0xc4, 0x60, 0xeb, 0x40, 0x29, 0xaa,
-	0x1d, 0x91, 0x3a, 0x4d, 0xa5, 0x8d, 0xd2, 0xcb, 0x7f, 0x4f, 0x41, 0x2e, 0xea, 0x3b, 0x58, 0x49,
-	0xe0, 0xfe, 0xc2, 0xe6, 0x9b, 0x4f, 0x1a, 0xd5, 0x49, 0xd4, 0xff, 0x7c, 0x4e, 0xa2, 0x2d, 0xc8,
-	0x1e, 0xd2, 0x7c, 0x89, 0x2b, 0xed, 0xad, 0x59, 0x72, 0xac, 0x73, 0x55, 0xbc, 0x06, 0x63, 0xf7,
-	0x08, 0x06, 0x42, 0xb2, 0xd1, 0xed, 0x6b, 0xec, 0x86, 0xb1, 0x0c, 0x39, 0xd3, 0xef, 0x07, 0x4d,
-	0xeb, 0x34, 0xa8, 0x2c, 0xb0, 0xae, 0x1e, 0x8f, 0xa9, 0x15, 0xfe, 0x9c, 0x2c, 0xac, 0xe4, 0x12,
-	0x87, 0xf8, 0x18, 0x67, 0x27, 0x93, 0x4b, 0xa1, 0xb4, 0xb8, 0x4a, 0xfc, 0x5e, 0x02, 0x38, 0xef,
-	0x8e, 0x14, 0x63, 0xea, 0xda, 0x3d, 0x43, 0xed, 0xee, 0x6e, 0x29, 0xba, 0xa8, 0x33, 0x59, 0xbd,
-	0xc3, 0xd1, 0x67, 0x5d, 0x51, 0xdb, 0x8a, 0xc1, 0xc6, 0x2c, 0x49, 0x02, 0x1e, 0x73, 0x4a, 0x9a,
-	0x82, 0xf1, 0x5a, 0x77, 0x97, 0x81, 0xe8, 0x0e, 0xbf, 0x55, 0x30, 0xe8, 0xcc, 0x6f, 0x15, 0x2d,
-	0x79, 0x1b, 0xcd, 0x53, 0x73, 0x2d, 0x45, 0xae, 0xa3, 0x05, 0x5a, 0x3f, 0x8d, 0xa6, 0xde, 0xee,
-	0x18, 0xfb, 0x72, 0xab, 0xab, 0xa0, 0x1c, 0xb5, 0xdf, 0x92, 0xe3, 0x71, 0x9e, 0x5a, 0x53, 0x3b,
-	0xb7, 0xc5, 0x10, 0x6e, 0xfe, 0x02, 0xca, 0xe3, 0x5f, 0x49, 0x68, 0xe1, 0xef, 0x75, 0xb7, 0x5a,
-	0xcd, 0x1a, 0x9a, 0xc3, 0xaf, 0xc0, 0x4b, 0xfc, 0x37, 0xc5, 0xfa, 0xec, 0x3a, 0x24, 0x58, 0xd2,
-	0xd6, 0x5b, 0x0f, 0xbf, 0x5d, 0x99, 0x7b, 0xf8, 0x68, 0x45, 0xfa, 0xfa, 0xd1, 0x8a, 0xf4, 0xcd,
-	0xa3, 0x15, 0xe9, 0x9f, 0x8f, 0x56, 0xa4, 0x5f, 0x7f, 0xb7, 0x32, 0xf7, 0xf5, 0x77, 0x2b, 0x73,
-	0xdf, 0x7c, 0xb7, 0x32, 0xf7, 0x71, 0x21, 0xf1, 0xcf, 0x0b, 0xff, 0x09, 0x00, 0x00, 0xff, 0xff,
-	0xe9, 0xbf, 0xa9, 0xd1, 0xac, 0x21, 0x00, 0x00,
+var fileDescriptor_processors_sql_0901999adc18b9c0 = []byte{
+	// 2881 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xc4, 0x5a, 0xcd, 0x6f, 0x1b, 0xc7,
+	0x15, 0xd7, 0xf2, 0x43, 0x22, 0x1f, 0x3f, 0x34, 0x1e, 0x3b, 0x31, 0xa3, 0xa4, 0xb2, 0x4c, 0x3b,
+	0xb6, 0xec, 0x38, 0x52, 0xa3, 0x16, 0x29, 0x92, 0x16, 0x45, 0x57, 0xe4, 0x92, 0xa6, 0x4c, 0xed,
+	0xd2, 0x4b, 0x52, 0x96, 0x13, 0x20, 0x83, 0x15, 0x39, 0xa2, 0x36, 0x5e, 0xee, 0x52, 0xbb, 0x4b,
+	0x4b, 0xca, 0xa9, 0xe8, 0xa5, 0xa7, 0x02, 0x05, 0x7a, 0x29, 0x50, 0xa0, 0x08, 0x0a, 0xf4, 0x3f,
+	0xe8, 0xb9, 0xa7, 0x1e, 0x7c, 0xcc, 0xa9, 0xcd, 0x29, 0x68, 0x9c, 0x9e, 0xfa, 0x0f, 0x14, 0xbd,
+	0x15, 0x33, 0x3b, 0xbb, 0x5a, 0x0a, 0xa2, 0x6b, 0x3a, 0x4e, 0x7c, 0x31, 0x38, 0xef, 0xbd, 0xdf,
+	0x9b, 0x37, 0xef, 0x6b, 0xde, 0xac, 0x0c, 0xd7, 0xbd, 0x43, 0x6b, 0x9d, 0x1e, 0xd3, 0x9e, 0x69,
+	0xef, 0xbb, 0xc6, 0x68, 0x6f, 0x7d, 0xe4, 0x3a, 0x3d, 0xea, 0x79, 0x8e, 0xeb, 0x11, 0xef, 0xd0,
+	0x5a, 0x1b, 0xb9, 0x8e, 0xef, 0xe0, 0x52, 0xcf, 0xe9, 0x3d, 0x72, 0x1d, 0xa3, 0x77, 0xb0, 0xc6,
+	0x88, 0x7d, 0xd3, 0xf3, 0xbd, 0x43, 0xcb, 0x1d, 0xdb, 0x4b, 0xd7, 0x18, 0xbe, 0x67, 0xf8, 0x86,
+	0xe5, 0x0c, 0xd6, 0xfb, 0xd4, 0xeb, 0x8d, 0xf6, 0xd6, 0x3d, 0xdf, 0x1d, 0xf7, 0xfc, 0xb1, 0x4b,
+	0xfb, 0x01, 0x7c, 0xa9, 0x7c, 0x8e, 0xd0, 0xa7, 0x8e, 0x69, 0x13, 0xff, 0x64, 0x44, 0x85, 0xcc,
+	0xca, 0x39, 0x32, 0x96, 0xd3, 0x7b, 0x64, 0xda, 0x03, 0x21, 0xf1, 0x1a, 0x93, 0x60, 0x08, 0x2f,
+	0xf8, 0x57, 0x90, 0x97, 0xce, 0x9e, 0xa0, 0x6f, 0xf8, 0x86, 0xe0, 0xbd, 0xfd, 0x8c, 0xd3, 0xed,
+	0x19, 0x5e, 0xb8, 0xf7, 0x6d, 0x26, 0xe6, 0x8c, 0xfc, 0x75, 0xd3, 0x7e, 0x4c, 0x5d, 0x9f, 0xf6,
+	0xe9, 0xf1, 0xc8, 0x5d, 0xf7, 0x46, 0x86, 0x4d, 0xd8, 0x2f, 0xea, 0x79, 0xa6, 0x63, 0x0b, 0xd9,
+	0x4b, 0x03, 0x67, 0xe0, 0xf0, 0x9f, 0xeb, 0xec, 0x57, 0x40, 0x2d, 0xff, 0x4e, 0x82, 0xe2, 0x8e,
+	0x61, 0x8d, 0xa9, 0x57, 0x71, 0x5c, 0xda, 0x1e, 0xd1, 0x1e, 0xae, 0xc0, 0x42, 0xcf, 0xb1, 0xc6,
+	0x43, 0xdb, 0x2b, 0x49, 0x2b, 0xc9, 0xd5, 0xdc, 0xc6, 0xb5, 0xb5, 0x69, 0x5e, 0x5c, 0xab, 0x1a,
+	0xfe, 0x78, 0xd8, 0xb0, 0xf7, 0x9d, 0xcd, 0xd4, 0x93, 0xaf, 0xae, 0xcc, 0xe9, 0x21, 0x12, 0xbf,
+	0x09, 0x59, 0xd7, 0x38, 0x22, 0x7b, 0x27, 0x3e, 0xf5, 0x4a, 0x89, 0x95, 0xe4, 0x6a, 0x5e, 0xcf,
+	0xb8, 0xc6, 0xd1, 0x26, 0x5b, 0xe3, 0x2b, 0x90, 0xb1, 0xc7, 0x43, 0xe2, 0x3a, 0x47, 0x5e, 0x29,
+	0xb9, 0x22, 0xad, 0xa6, 0x42, 0xb4, 0x3d, 0x1e, 0xea, 0xce, 0x91, 0x57, 0xfe, 0xd5, 0x3c, 0x2c,
+	0x76, 0x8c, 0x3d, 0x8b, 0xea, 0xd4, 0xe8, 0x53, 0x97, 0x9b, 0xb5, 0x09, 0x69, 0x9f, 0x91, 0x4a,
+	0xd2, 0x8a, 0xb4, 0x9a, 0xdb, 0xb8, 0x71, 0xc6, 0x28, 0xef, 0xd0, 0xe2, 0x8e, 0xe1, 0xb0, 0x2a,
+	0xf5, 0x7a, 0xae, 0x39, 0xf2, 0x1d, 0x57, 0x68, 0x0e, 0xa0, 0xf8, 0x2a, 0x64, 0x4d, 0xbb, 0x4f,
+	0x8f, 0x89, 0xd9, 0x3f, 0x2e, 0x25, 0x56, 0xa4, 0xd5, 0x82, 0xe0, 0x67, 0x38, 0xb9, 0xd1, 0x3f,
+	0xc6, 0xcb, 0xb0, 0xe0, 0xd2, 0xc7, 0xd4, 0xf5, 0x28, 0x37, 0x2d, 0x13, 0x9a, 0x26, 0x88, 0x58,
+	0x81, 0x34, 0xf3, 0xaf, 0x57, 0x4a, 0x71, 0xdf, 0xdc, 0x9a, 0xee, 0x9b, 0x89, 0x03, 0x18, 0x76,
+	0x68, 0x09, 0x47, 0xe3, 0x6b, 0x00, 0x96, 0x39, 0x34, 0x7d, 0x72, 0x60, 0xda, 0x7e, 0x29, 0xbd,
+	0x22, 0xad, 0x26, 0x85, 0x40, 0x96, 0xd3, 0xef, 0x9a, 0xb6, 0xcf, 0xfc, 0x64, 0x7a, 0xa4, 0x77,
+	0x40, 0x7b, 0x8f, 0x4a, 0xf3, 0x71, 0x63, 0x4c, 0xaf, 0xc2, 0x88, 0x58, 0x05, 0x78, 0x6c, 0x7a,
+	0xe6, 0x9e, 0x69, 0x99, 0xfe, 0x49, 0x69, 0x61, 0x45, 0x5a, 0x2d, 0x6e, 0xac, 0x4e, 0xb7, 0xa8,
+	0xdd, 0x33, 0xec, 0x9d, 0x48, 0x5e, 0x28, 0x8b, 0x69, 0xc0, 0x3f, 0x85, 0xcb, 0x43, 0xe3, 0x98,
+	0xf8, 0xe6, 0x90, 0x7a, 0xbe, 0x31, 0x1c, 0x11, 0x63, 0x40, 0x89, 0x6d, 0xd8, 0x8e, 0x57, 0xca,
+	0xc6, 0xe2, 0x74, 0x69, 0x68, 0x1c, 0x77, 0x42, 0x19, 0x79, 0x40, 0x55, 0x26, 0x81, 0x3f, 0x06,
+	0x24, 0xf2, 0x9e, 0x78, 0xbe, 0x4b, 0xed, 0x81, 0x7f, 0x50, 0x02, 0x6e, 0xd2, 0xed, 0x29, 0xb1,
+	0x62, 0xf6, 0x34, 0x03, 0x48, 0x5b, 0x20, 0xc4, 0x0e, 0x8b, 0xd6, 0x24, 0x19, 0xef, 0xc1, 0xc5,
+	0x50, 0xf9, 0x91, 0x61, 0xfa, 0x64, 0xe4, 0x58, 0x66, 0xef, 0xa4, 0x94, 0xe3, 0xfa, 0xef, 0xfc,
+	0x7f, 0xfd, 0x0f, 0x0c, 0xd3, 0x6f, 0x71, 0x8c, 0xd8, 0xe1, 0x82, 0x75, 0x96, 0x81, 0x6f, 0x40,
+	0x6e, 0x64, 0xb8, 0x86, 0x65, 0x51, 0xcb, 0xfc, 0x8c, 0x96, 0xf2, 0x31, 0x8f, 0xc7, 0x19, 0x78,
+	0x03, 0xf0, 0x81, 0xe1, 0x11, 0xef, 0xc4, 0xf3, 0xe9, 0x90, 0x84, 0xb5, 0x52, 0x8c, 0x89, 0xa3,
+	0x03, 0xc3, 0x6b, 0x73, 0x76, 0x45, 0xd4, 0xc3, 0xdb, 0x50, 0xb4, 0x29, 0xed, 0xd3, 0x7e, 0x24,
+	0xbf, 0xb8, 0x92, 0x5c, 0x2d, 0xe8, 0x85, 0x80, 0x2a, 0xc4, 0xb6, 0x52, 0x99, 0x0c, 0xca, 0x6e,
+	0xa5, 0x32, 0x05, 0x54, 0x2c, 0xeb, 0x90, 0xaf, 0x99, 0x96, 0x4f, 0xdd, 0xa8, 0x00, 0xe6, 0xf7,
+	0xf9, 0x5a, 0x54, 0xc0, 0xf5, 0xe9, 0x81, 0x56, 0xa2, 0xe2, 0x17, 0x06, 0x09, 0x64, 0xf9, 0xbf,
+	0x49, 0x28, 0x35, 0x58, 0xaa, 0xb7, 0x1f, 0x99, 0xa3, 0x57, 0x54, 0x61, 0x51, 0x05, 0x25, 0xbf,
+	0x55, 0x05, 0x4d, 0xe6, 0x7e, 0xea, 0x5b, 0xe7, 0x7e, 0xac, 0xf0, 0xd3, 0xe7, 0x15, 0xfe, 0x79,
+	0xe9, 0x3d, 0xff, 0x1d, 0xa7, 0xf7, 0xc2, 0x4b, 0x4c, 0xef, 0xf2, 0x2f, 0x17, 0xa0, 0xb8, 0xe5,
+	0x98, 0xf6, 0xf7, 0x1f, 0xf1, 0x5b, 0x50, 0xb4, 0x1c, 0xe7, 0xd1, 0x78, 0x14, 0x25, 0x3f, 0x0b,
+	0x7d, 0x61, 0x33, 0x81, 0x24, 0xbd, 0x10, 0x70, 0xc2, 0x3a, 0xa9, 0xc0, 0x82, 0x13, 0x5c, 0x5e,
+	0x3c, 0xa4, 0x33, 0x66, 0xb9, 0x63, 0x33, 0x1a, 0xfe, 0x00, 0x52, 0xec, 0xa2, 0x15, 0xe1, 0xb9,
+	0x32, 0xe5, 0x54, 0xcc, 0x17, 0x9d, 0x93, 0x11, 0x15, 0x60, 0x0e, 0x79, 0xe9, 0x1d, 0xf5, 0x03,
+	0x78, 0x7d, 0xf2, 0xe8, 0xc4, 0x70, 0x29, 0x79, 0x44, 0x4f, 0x4a, 0x99, 0x58, 0x92, 0x5d, 0x9c,
+	0x70, 0x82, 0xec, 0xd2, 0x7b, 0xf4, 0xe4, 0xdc, 0x84, 0xcb, 0x7e, 0xc7, 0x09, 0x07, 0x2f, 0xb3,
+	0x9f, 0xbe, 0x07, 0x17, 0x86, 0x86, 0x69, 0xfb, 0x86, 0x69, 0x13, 0xc7, 0xed, 0x53, 0xd7, 0xb4,
+	0x07, 0xbc, 0x63, 0x47, 0x6d, 0x32, 0x64, 0x6b, 0x82, 0x3b, 0xa5, 0xb5, 0x16, 0x9e, 0xd9, 0x5a,
+	0xab, 0xf0, 0x96, 0x45, 0xf7, 0x7d, 0xc2, 0x07, 0xb3, 0x23, 0xd3, 0x3f, 0x20, 0x23, 0xc3, 0x74,
+	0x69, 0x9f, 0x13, 0xa8, 0x3b, 0xd1, 0x98, 0x4b, 0x4c, 0x92, 0x05, 0xfe, 0x81, 0xe9, 0x1f, 0xb4,
+	0xb8, 0xd8, 0x16, 0x97, 0xc2, 0x0f, 0xe0, 0x86, 0x33, 0xf6, 0x47, 0x63, 0x9f, 0x0c, 0x5c, 0x87,
+	0x87, 0xcb, 0xf6, 0x4d, 0x7b, 0x6c, 0xf8, 0xa6, 0x63, 0x93, 0x7d, 0xc7, 0x25, 0x7c, 0x0f, 0xd7,
+	0x39, 0x2a, 0x2d, 0xc6, 0xf4, 0x5d, 0x0d, 0x30, 0x75, 0x06, 0xa9, 0xc4, 0x10, 0x35, 0xc7, 0x6d,
+	0xd2, 0x7d, 0x5f, 0x77, 0x8e, 0xb6, 0x52, 0x99, 0x34, 0x9a, 0xdf, 0x4a, 0x65, 0xf2, 0xa8, 0xc0,
+	0xa6, 0x2d, 0x68, 0x3b, 0xae, 0x2f, 0xca, 0xef, 0x3e, 0x2c, 0x8a, 0x3d, 0x23, 0xf7, 0x04, 0x85,
+	0x58, 0x9e, 0x9e, 0x71, 0xa1, 0xab, 0x84, 0x01, 0xc5, 0x40, 0x41, 0xdc, 0x81, 0xa1, 0x2e, 0x32,
+	0x34, 0xfc, 0xde, 0x01, 0xb1, 0xa8, 0x3d, 0x51, 0x96, 0x28, 0xe4, 0x6f, 0x33, 0x76, 0x93, 0xda,
+	0xe5, 0xbf, 0x4a, 0x90, 0xaf, 0x9a, 0x9e, 0x6f, 0xda, 0x3d, 0x9f, 0xdb, 0x75, 0x13, 0x16, 0xb9,
+	0x50, 0xec, 0xb6, 0x92, 0xf8, 0x6d, 0x55, 0x14, 0xe4, 0xd0, 0xf5, 0xb7, 0x00, 0xf5, 0x05, 0x30,
+	0x92, 0x4c, 0x70, 0xc9, 0xc5, 0x90, 0x1e, 0x8a, 0x6e, 0x00, 0xb6, 0xc7, 0x96, 0x15, 0xe4, 0x7f,
+	0xc8, 0x9c, 0x18, 0xb1, 0x10, 0xe7, 0xcb, 0x2e, 0x0d, 0x6d, 0xc1, 0x37, 0x20, 0x4f, 0x5d, 0xd7,
+	0x71, 0x89, 0x63, 0x93, 0xfe, 0x78, 0xc4, 0x3b, 0x42, 0x36, 0x2c, 0x32, 0xce, 0xd1, 0xec, 0xea,
+	0x78, 0x54, 0x46, 0x50, 0xd4, 0xdc, 0xbe, 0x69, 0x1b, 0xac, 0xe4, 0xd8, 0x09, 0xca, 0xbf, 0x4f,
+	0x02, 0xfa, 0xc8, 0x1c, 0x7c, 0x66, 0x0c, 0x82, 0xf0, 0xf2, 0x63, 0x55, 0x61, 0x9e, 0xb7, 0xac,
+	0x70, 0xae, 0x9d, 0xad, 0xdd, 0x09, 0x2c, 0xae, 0x01, 0xd0, 0xc3, 0x89, 0xd3, 0xe6, 0x36, 0xae,
+	0x4e, 0x8f, 0x97, 0x38, 0x7f, 0x38, 0xdc, 0xd1, 0xc3, 0x53, 0xdf, 0x15, 0x83, 0xbe, 0xe9, 0x04,
+	0xa6, 0x4f, 0x34, 0x45, 0xce, 0x11, 0x67, 0x7a, 0x49, 0x4d, 0xf1, 0x1e, 0xe4, 0xf7, 0xcd, 0x63,
+	0xda, 0x27, 0x8f, 0xf9, 0xb8, 0x5f, 0x4a, 0x73, 0xcb, 0x9f, 0xd1, 0xdb, 0x26, 0x9f, 0x05, 0x7a,
+	0x8e, 0xa3, 0x03, 0xe2, 0xb7, 0xe8, 0xb0, 0xe5, 0xbf, 0x27, 0x61, 0x71, 0x9b, 0xba, 0x03, 0x1a,
+	0x8b, 0xcc, 0x36, 0x14, 0x78, 0x79, 0xbd, 0x70, 0x19, 0xe4, 0x19, 0x3c, 0x2a, 0x02, 0x0d, 0x8a,
+	0xae, 0x39, 0x38, 0x88, 0xe9, 0x4b, 0xcc, 0xa8, 0xaf, 0xc0, 0xf1, 0x91, 0xc2, 0x58, 0x00, 0xd2,
+	0xaf, 0xe2, 0x56, 0xba, 0x05, 0x05, 0x56, 0x1c, 0x84, 0x1e, 0x8e, 0x8d, 0xe8, 0x62, 0x0a, 0xeb,
+	0x26, 0xcf, 0x58, 0x8a, 0xe0, 0xe0, 0x0f, 0xe1, 0x32, 0x77, 0xe5, 0x69, 0x8e, 0x4e, 0xb9, 0x71,
+	0xe8, 0xbe, 0xaf, 0x1c, 0x4e, 0xde, 0x38, 0x3f, 0x83, 0x52, 0xe0, 0xb7, 0x73, 0xc0, 0xd9, 0x18,
+	0xf8, 0x12, 0x97, 0x3a, 0x83, 0x2e, 0xff, 0x3b, 0x01, 0xc5, 0xbb, 0x86, 0x77, 0x10, 0x8b, 0xeb,
+	0x6d, 0x58, 0x3c, 0x63, 0x4c, 0xd0, 0x48, 0xc4, 0xcd, 0x1f, 0x37, 0x01, 0xdf, 0x01, 0x74, 0x76,
+	0xf3, 0xa0, 0x97, 0x70, 0xe1, 0xe2, 0xe4, 0x96, 0xaf, 0x3c, 0x22, 0xaf, 0xcc, 0xcd, 0x5b, 0xa9,
+	0xcc, 0x02, 0xca, 0x94, 0xbf, 0x4a, 0x02, 0x6e, 0x88, 0x47, 0x7f, 0xcc, 0xe1, 0xdf, 0xd3, 0x40,
+	0xa7, 0x41, 0x21, 0xfc, 0xe2, 0xf0, 0xa2, 0x6d, 0x29, 0x1f, 0x2a, 0xe0, 0x91, 0x78, 0xd5, 0xe1,
+	0x3c, 0x77, 0x54, 0x59, 0x78, 0xe6, 0xa8, 0xf2, 0xfc, 0x03, 0x43, 0x66, 0xd6, 0x81, 0x21, 0x89,
+	0x52, 0xe5, 0x3f, 0x25, 0xe1, 0x52, 0x18, 0xe0, 0x89, 0x67, 0xe0, 0x1a, 0xa0, 0xc8, 0xf7, 0x3d,
+	0xc7, 0xe2, 0x51, 0x92, 0x62, 0x51, 0x2a, 0x86, 0xdc, 0x8a, 0x63, 0xb1, 0x58, 0x7d, 0x72, 0x36,
+	0x56, 0x41, 0x2f, 0xfc, 0xd1, 0x19, 0xf7, 0x38, 0x23, 0x7f, 0x2d, 0xfe, 0x15, 0x69, 0x8d, 0xbd,
+	0xb8, 0x4e, 0x5d, 0xdd, 0x72, 0x1d, 0xdf, 0x39, 0x37, 0x74, 0x9f, 0xc2, 0x85, 0x91, 0x4b, 0xc9,
+	0xbe, 0xb0, 0x91, 0x78, 0x23, 0xda, 0xe3, 0x21, 0xc8, 0x6d, 0xfc, 0x7c, 0x7a, 0x10, 0xcf, 0x3b,
+	0xda, 0x5a, 0xcb, 0xa5, 0xf1, 0xb5, 0xbe, 0x38, 0x9a, 0x24, 0x2c, 0xfd, 0x46, 0x82, 0xc5, 0x33,
+	0x42, 0x78, 0x0b, 0xe0, 0xf4, 0x5b, 0xd7, 0x0b, 0x3c, 0x8d, 0x63, 0x68, 0xbc, 0x26, 0x32, 0x28,
+	0x70, 0xd1, 0xd2, 0xd9, 0x0c, 0xa2, 0xc3, 0xb5, 0xe0, 0x03, 0x5e, 0x47, 0xdc, 0x65, 0xff, 0xca,
+	0x42, 0x51, 0x1e, 0x0c, 0x5c, 0x3a, 0x30, 0x7c, 0x27, 0x30, 0xe7, 0x2a, 0x40, 0x98, 0x0f, 0x56,
+	0xbc, 0x81, 0x65, 0x07, 0x41, 0xc8, 0x2d, 0x0f, 0x7f, 0x02, 0x79, 0x43, 0x80, 0x4c, 0x27, 0x7a,
+	0x07, 0xff, 0x78, 0xba, 0xcd, 0x93, 0x5b, 0x44, 0xcb, 0x58, 0x31, 0xc5, 0xf5, 0xe1, 0x1f, 0x8a,
+	0x19, 0x90, 0xf6, 0x49, 0xcc, 0x94, 0x54, 0x64, 0x0a, 0x12, 0xdc, 0x7a, 0x64, 0x51, 0x5d, 0x9c,
+	0x3b, 0xcd, 0x2b, 0xe7, 0xdd, 0xe7, 0xb6, 0xe4, 0x6c, 0x1d, 0x2d, 0xfd, 0x3a, 0x01, 0xb9, 0x98,
+	0x79, 0x4c, 0xf1, 0xfe, 0xd8, 0xee, 0xf1, 0xb0, 0xcc, 0xa2, 0xb8, 0x36, 0xb6, 0x7b, 0xa1, 0x62,
+	0xa6, 0x00, 0xaf, 0x40, 0x26, 0x1a, 0x1a, 0x13, 0xb1, 0x7a, 0x8a, 0xa8, 0xf8, 0x3a, 0x14, 0x83,
+	0x1c, 0x8c, 0xaa, 0x82, 0x35, 0xa5, 0x82, 0x9e, 0x0f, 0xa8, 0xa2, 0x1a, 0x2e, 0xf3, 0x8f, 0x9b,
+	0x9c, 0x9d, 0xe6, 0x83, 0xea, 0x7c, 0x2f, 0x60, 0xdc, 0x85, 0xac, 0xe1, 0x0e, 0xc6, 0x43, 0x6a,
+	0xfb, 0x5e, 0x69, 0x9e, 0x47, 0x64, 0x96, 0x2c, 0x3a, 0x05, 0x8b, 0xfa, 0xfd, 0x43, 0x1a, 0x52,
+	0xec, 0x14, 0x18, 0x41, 0x5e, 0x56, 0x1f, 0x12, 0x55, 0xeb, 0x10, 0xb5, 0xdb, 0x6c, 0xa2, 0x39,
+	0xbc, 0x00, 0x49, 0x79, 0xa7, 0x8e, 0x24, 0x9c, 0x87, 0xcc, 0xa6, 0xa6, 0x35, 0x89, 0xac, 0x56,
+	0x51, 0x02, 0xe7, 0x60, 0x81, 0xaf, 0x34, 0x1d, 0x25, 0x71, 0x11, 0xa0, 0xa2, 0xa9, 0x15, 0xb9,
+	0x43, 0xe4, 0x7a, 0x1d, 0xa5, 0x70, 0x16, 0xd2, 0x15, 0xad, 0xab, 0x76, 0x50, 0x9a, 0xc1, 0xb7,
+	0xe5, 0x5d, 0xb4, 0xc0, 0x7f, 0x34, 0x54, 0x94, 0xc1, 0x00, 0xf3, 0xed, 0x4e, 0xb5, 0xaa, 0xec,
+	0xa0, 0x2c, 0x23, 0xb6, 0xbb, 0xdb, 0x08, 0x98, 0xba, 0x76, 0x77, 0x9b, 0x34, 0xd4, 0x0e, 0xca,
+	0xb1, 0x9d, 0x76, 0x64, 0xbd, 0x21, 0xab, 0x15, 0x05, 0xe5, 0x19, 0x6b, 0x57, 0xd3, 0xb9, 0xe6,
+	0x42, 0xb0, 0x53, 0x57, 0xed, 0x10, 0x5d, 0x7b, 0xd0, 0x46, 0x45, 0x8e, 0xbb, 0xaf, 0x57, 0x1b,
+	0xb5, 0x1a, 0x5a, 0xc4, 0x18, 0x8a, 0xb5, 0x86, 0x2a, 0x37, 0x49, 0x84, 0x46, 0xec, 0x40, 0x01,
+	0x4d, 0xec, 0x79, 0x01, 0x17, 0x20, 0x2b, 0xeb, 0xba, 0xfc, 0x90, 0x6b, 0xc4, 0x6c, 0xb3, 0xad,
+	0xb6, 0xa6, 0xf2, 0xd5, 0x45, 0xc6, 0x64, 0xab, 0x4d, 0xbe, 0xbc, 0xc4, 0xb6, 0x6b, 0x77, 0xf4,
+	0x86, 0x5a, 0xe7, 0xeb, 0xd7, 0xf8, 0xa9, 0x1b, 0x1d, 0xee, 0x82, 0xd7, 0xd9, 0x41, 0xd8, 0x42,
+	0xd3, 0xd1, 0x65, 0x9c, 0x81, 0x54, 0x45, 0xd3, 0x75, 0x54, 0xc2, 0x25, 0xb8, 0xd4, 0x52, 0xf4,
+	0x8a, 0xa2, 0x76, 0x1a, 0x4d, 0x85, 0x54, 0x1b, 0xed, 0x0a, 0x69, 0x6c, 0xb7, 0x9a, 0xe8, 0x8d,
+	0x33, 0x9c, 0x8a, 0xa6, 0x76, 0x02, 0xce, 0x12, 0xbe, 0x08, 0x8b, 0xdc, 0x06, 0x6d, 0x73, 0x4b,
+	0xa9, 0x04, 0x4e, 0x7c, 0x13, 0x5f, 0x02, 0x14, 0x98, 0x12, 0xa3, 0xbe, 0xc5, 0x2c, 0xd8, 0x91,
+	0x75, 0xd2, 0xd2, 0x5a, 0xe8, 0x07, 0x81, 0x79, 0xec, 0x58, 0x7c, 0xbd, 0x8c, 0x17, 0x21, 0xd7,
+	0xee, 0x90, 0x6d, 0xf9, 0x9e, 0xd2, 0x6c, 0xa8, 0x0a, 0xba, 0xc2, 0x8e, 0xd3, 0xee, 0x10, 0x65,
+	0xb7, 0xa3, 0xa8, 0x1d, 0xb4, 0xc2, 0xce, 0xda, 0xee, 0x90, 0xae, 0xda, 0xd0, 0x54, 0x74, 0x35,
+	0x40, 0x93, 0x8a, 0xd6, 0x6c, 0x2a, 0x95, 0x0e, 0x2a, 0x33, 0xe1, 0x8a, 0x16, 0x2a, 0xbf, 0x16,
+	0xb8, 0x9a, 0x2d, 0xdb, 0xf2, 0x76, 0x0b, 0x5d, 0x67, 0xde, 0xd5, 0x95, 0xba, 0xce, 0x62, 0xc4,
+	0x4e, 0xd1, 0xea, 0xa0, 0xb7, 0x99, 0x35, 0x9c, 0xa6, 0x6f, 0xa0, 0x1b, 0x0c, 0xc0, 0x17, 0xed,
+	0xa6, 0xd6, 0x52, 0xd0, 0x4d, 0xb6, 0x5b, 0xb0, 0xde, 0xdd, 0x45, 0xab, 0xa7, 0xab, 0x87, 0x0f,
+	0xd1, 0xad, 0x18, 0xef, 0x21, 0xba, 0x1d, 0x21, 0x83, 0xa4, 0x79, 0x87, 0x59, 0xc2, 0xd7, 0xf2,
+	0x4e, 0x7d, 0x17, 0xdd, 0x29, 0xdf, 0x81, 0x14, 0xab, 0x5d, 0xe6, 0x64, 0xb9, 0xdb, 0xd1, 0xd0,
+	0x1c, 0xcf, 0xa1, 0x8a, 0xdc, 0x94, 0x75, 0x24, 0x31, 0xb0, 0xaa, 0xa9, 0x44, 0xac, 0x13, 0xe5,
+	0xbf, 0x49, 0x50, 0x6c, 0xb9, 0xce, 0xa7, 0xb4, 0xe7, 0xb7, 0x69, 0xf0, 0x44, 0xfc, 0x05, 0xa4,
+	0x59, 0xdf, 0x0c, 0x9f, 0x52, 0xb3, 0x94, 0x4a, 0x00, 0xc4, 0x75, 0xb8, 0x30, 0xa0, 0x36, 0x75,
+	0x0d, 0x3f, 0xf6, 0xcc, 0x0c, 0x9e, 0x53, 0xcf, 0x6a, 0xbc, 0x28, 0x02, 0x85, 0xa3, 0xe0, 0x4d,
+	0x40, 0xf6, 0x98, 0x7f, 0x2c, 0xf0, 0xc8, 0x88, 0xba, 0x64, 0x40, 0xed, 0xe0, 0x29, 0xa5, 0x17,
+	0xec, 0xf1, 0x90, 0xf5, 0xb7, 0x16, 0x75, 0xeb, 0xd4, 0x2e, 0x7f, 0x5d, 0x80, 0xfc, 0x03, 0xd3,
+	0xee, 0x3b, 0x47, 0xe2, 0xea, 0x58, 0xe1, 0x1f, 0x7c, 0x7d, 0x93, 0x77, 0xd2, 0x13, 0xf1, 0xc6,
+	0x8d, 0x93, 0x70, 0x1b, 0xb2, 0x47, 0x1c, 0x51, 0x8b, 0x8c, 0x5b, 0x9f, 0x7e, 0xd4, 0xb8, 0x72,
+	0xb1, 0xa8, 0x45, 0x0d, 0x22, 0xd2, 0xb3, 0xf4, 0x17, 0x49, 0xb4, 0x86, 0x36, 0x14, 0xc2, 0xc6,
+	0x4d, 0x6b, 0x2f, 0xda, 0x26, 0xf5, 0x49, 0x1d, 0xf8, 0x3e, 0x80, 0xd8, 0x8a, 0x69, 0x4c, 0x70,
+	0x8d, 0xef, 0xcd, 0x66, 0x33, 0xd3, 0x1a, 0x53, 0xf2, 0x61, 0xea, 0xc9, 0xe7, 0x57, 0xa4, 0xa5,
+	0xcf, 0x17, 0x20, 0x5d, 0x73, 0x8d, 0x21, 0xc5, 0xf7, 0x20, 0x35, 0x74, 0xfa, 0x54, 0x98, 0xfb,
+	0xbc, 0xca, 0x39, 0x76, 0x6d, 0xdb, 0xe9, 0x47, 0x57, 0x06, 0x53, 0x82, 0xef, 0xc3, 0xfc, 0x9e,
+	0x33, 0xb6, 0xfb, 0xde, 0x94, 0xc1, 0xe4, 0xd9, 0xea, 0x36, 0x39, 0x34, 0x1c, 0x04, 0x03, 0x45,
+	0xf8, 0x23, 0xc8, 0xd2, 0xe3, 0x9e, 0x35, 0xe6, 0x13, 0x41, 0x92, 0x1b, 0xf9, 0xfe, 0x4c, 0x5a,
+	0x95, 0x10, 0x1d, 0x3d, 0xdb, 0x43, 0xc2, 0xd2, 0x7f, 0x24, 0x48, 0xf3, 0x4d, 0xd9, 0x2e, 0x7c,
+	0x3f, 0x56, 0x48, 0xc2, 0x15, 0xef, 0xcf, 0x6e, 0x7b, 0xec, 0x0a, 0x3d, 0x55, 0x87, 0xaf, 0x01,
+	0x98, 0xb6, 0x4f, 0x9c, 0xfd, 0x7d, 0x8f, 0x06, 0x17, 0x5e, 0xf8, 0xb7, 0x97, 0xac, 0x69, 0xfb,
+	0x1a, 0x27, 0xe3, 0xab, 0x90, 0x67, 0x55, 0xd1, 0x0f, 0xc5, 0xd8, 0x49, 0xf3, 0x7a, 0x8e, 0xd3,
+	0x84, 0xc8, 0x16, 0xe4, 0x02, 0x26, 0xff, 0x8b, 0xa5, 0x18, 0xd3, 0x67, 0xf8, 0x7b, 0x1e, 0x04,
+	0x68, 0x66, 0xd3, 0xd2, 0x1f, 0x25, 0x98, 0x0f, 0xdc, 0x8d, 0x55, 0x48, 0x7b, 0xbe, 0xe1, 0xfa,
+	0x62, 0xdc, 0xda, 0x98, 0xfd, 0xd8, 0xd1, 0xb7, 0x7c, 0xa6, 0x06, 0x57, 0x21, 0x49, 0xed, 0xbe,
+	0x48, 0x80, 0x17, 0xd0, 0xa6, 0x33, 0x78, 0xf9, 0x26, 0xa4, 0x58, 0x76, 0xb1, 0xbb, 0x52, 0x97,
+	0xd5, 0xba, 0x82, 0xe6, 0x58, 0x7f, 0xe3, 0xd7, 0x9a, 0xc4, 0xfa, 0x5b, 0x5d, 0xd7, 0xba, 0xad,
+	0x36, 0x4a, 0x94, 0x3f, 0x83, 0x6c, 0xe4, 0x7b, 0x7c, 0x19, 0x2e, 0x76, 0xd5, 0x4d, 0xad, 0xab,
+	0x56, 0x95, 0x2a, 0x69, 0xe9, 0x4a, 0x45, 0xa9, 0x36, 0xd4, 0x3a, 0x9a, 0x9b, 0x64, 0xd4, 0xb4,
+	0x66, 0x53, 0x7b, 0xc0, 0x18, 0x12, 0xbb, 0x46, 0xb4, 0x5a, 0xad, 0xad, 0x74, 0x62, 0xe2, 0x89,
+	0x18, 0xf5, 0x54, 0x36, 0xc9, 0xee, 0x8f, 0x4a, 0x57, 0xd7, 0x95, 0xe0, 0x7e, 0x45, 0xa9, 0xf2,
+	0xc7, 0x90, 0x8d, 0xb2, 0x8b, 0x5d, 0xa5, 0xaa, 0x46, 0x94, 0xdd, 0x4a, 0xb3, 0xdb, 0x66, 0x37,
+	0x08, 0xdf, 0x94, 0x2f, 0xab, 0x0a, 0x89, 0xe3, 0x24, 0x7c, 0x01, 0x0a, 0x21, 0x83, 0x9f, 0x03,
+	0x25, 0x18, 0x3a, 0x24, 0x75, 0x1a, 0x4a, 0x1b, 0x25, 0x97, 0xfe, 0x91, 0x80, 0x4c, 0xd8, 0x77,
+	0xb0, 0x12, 0x9b, 0xbd, 0x72, 0x1b, 0xef, 0x3c, 0xaf, 0x57, 0xcf, 0x4e, 0x5e, 0x55, 0xc8, 0x44,
+	0x2f, 0xa2, 0xd4, 0x8c, 0x9f, 0x51, 0x22, 0x24, 0x7b, 0x98, 0xee, 0xb3, 0x78, 0x89, 0xe7, 0xdd,
+	0x9d, 0x59, 0x62, 0xac, 0x07, 0x50, 0xbc, 0x0a, 0x13, 0xb3, 0x1c, 0x7f, 0x64, 0xa4, 0xc3, 0x09,
+	0x78, 0x62, 0xca, 0x5b, 0x82, 0x8c, 0xe1, 0x0e, 0xbc, 0x46, 0xff, 0xd8, 0x2b, 0x2d, 0xf0, 0xae,
+	0x1e, 0xad, 0x99, 0x96, 0xe0, 0x0d, 0x26, 0xb4, 0x64, 0x62, 0x6f, 0xa7, 0x09, 0xce, 0x56, 0x2a,
+	0x93, 0x40, 0x49, 0x31, 0xce, 0xfd, 0x59, 0x02, 0x38, 0xed, 0x8e, 0xfc, 0x7a, 0xd5, 0x1e, 0x10,
+	0xb5, 0xbb, 0xbd, 0xa9, 0xe8, 0x22, 0xcf, 0x64, 0xf5, 0x5e, 0x70, 0x77, 0x56, 0x15, 0xb5, 0xad,
+	0x10, 0xbe, 0xe6, 0x41, 0x12, 0x23, 0x4a, 0x40, 0x49, 0xf2, 0xa1, 0xa0, 0xbb, 0xcd, 0x07, 0x99,
+	0x4e, 0x30, 0xd9, 0xf1, 0xf1, 0x25, 0x98, 0xec, 0x9a, 0x72, 0x1d, 0xcd, 0x33, 0x75, 0x4d, 0x45,
+	0xae, 0xa2, 0x05, 0x96, 0x3f, 0xb5, 0x86, 0xde, 0xee, 0x90, 0x1d, 0xb9, 0xd9, 0x55, 0x50, 0x86,
+	0xe9, 0x6f, 0xca, 0xd1, 0x3a, 0xcb, 0xb4, 0xa9, 0x9d, 0xbb, 0x62, 0x09, 0xb7, 0x7f, 0x02, 0xc5,
+	0xc9, 0xbf, 0x49, 0xb0, 0xc4, 0x6f, 0x75, 0x37, 0x9b, 0x8d, 0x0a, 0x9a, 0xc3, 0x6f, 0xc0, 0x6b,
+	0xc1, 0x6f, 0x36, 0x6f, 0xf1, 0x91, 0x54, 0xb0, 0xa4, 0xcd, 0x77, 0x9f, 0x7c, 0xbd, 0x3c, 0xf7,
+	0xe4, 0xe9, 0xb2, 0xf4, 0xc5, 0xd3, 0x65, 0xe9, 0xcb, 0xa7, 0xcb, 0xd2, 0x3f, 0x9f, 0x2e, 0x4b,
+	0xbf, 0xfd, 0x66, 0x79, 0xee, 0x8b, 0x6f, 0x96, 0xe7, 0xbe, 0xfc, 0x66, 0x79, 0xee, 0xa3, 0x5c,
+	0xec, 0xff, 0x23, 0xfc, 0x2f, 0x00, 0x00, 0xff, 0xff, 0x31, 0x0f, 0x09, 0x60, 0x7f, 0x21, 0x00,
+	0x00,
 }

@@ -27,10 +27,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -160,6 +160,7 @@ func TestEval(t *testing.T) {
 					Post: execinfrapb.PostProcessSpec{
 						RenderExprs: []execinfrapb.Expression{{LocalExpr: typedExpr}},
 					},
+					ResultTypes: []*types.T{typedExpr.ResolvedType()},
 				},
 				Inputs: []colexecbase.Operator{
 					&colexecbase.CallbackOperator{
@@ -192,13 +193,13 @@ func TestEval(t *testing.T) {
 				nil, /* output */
 				result.MetadataSources,
 				nil, /* toClose */
-				nil, /* outputStatsToTrace */
+				nil, /* execStatsForTrace */
 				nil, /* cancelFlow */
 			)
 			require.NoError(t, err)
 
 			var (
-				row  sqlbase.EncDatumRow
+				row  rowenc.EncDatumRow
 				meta *execinfrapb.ProducerMetadata
 			)
 			ctx = mat.Start(ctx)

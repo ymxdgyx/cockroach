@@ -34,7 +34,10 @@ const (
 	validFrom     = -time.Hour * 24
 	maxPathLength = 1
 	caCommonName  = "Cockroach CA"
-	tenantsOU     = "Tenants"
+
+	// TenantsOU is the OrganizationalUnit that determines a client certificate should be treated as a tenant client
+	// certificate (as opposed to a KV node client certificate).
+	TenantsOU = "Tenants"
 )
 
 // newTemplate returns a partially-filled template.
@@ -119,11 +122,11 @@ func GenerateServerCert(
 	caPrivateKey crypto.PrivateKey,
 	nodePublicKey crypto.PublicKey,
 	lifetime time.Duration,
-	user string,
+	user SQLUsername,
 	hosts []string,
 ) ([]byte, error) {
 	// Create template for user.
-	template, err := newTemplate(user, lifetime)
+	template, err := newTemplate(user.Normalized(), lifetime)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +210,7 @@ func GenerateTenantClientCert(
 	}
 
 	// Create template for user.
-	template, err := newTemplate(fmt.Sprintf("%d", tenantID), lifetime, tenantsOU)
+	template, err := newTemplate(fmt.Sprintf("%d", tenantID), lifetime, TenantsOU)
 	if err != nil {
 		return nil, err
 	}
@@ -240,16 +243,16 @@ func GenerateClientCert(
 	caPrivateKey crypto.PrivateKey,
 	clientPublicKey crypto.PublicKey,
 	lifetime time.Duration,
-	user string,
+	user SQLUsername,
 ) ([]byte, error) {
 
 	// TODO(marc): should we add extra checks?
-	if len(user) == 0 {
+	if user.Undefined() {
 		return nil, errors.Errorf("user cannot be empty")
 	}
 
 	// Create template for user.
-	template, err := newTemplate(user, lifetime)
+	template, err := newTemplate(user.Normalized(), lifetime)
 	if err != nil {
 		return nil, err
 	}

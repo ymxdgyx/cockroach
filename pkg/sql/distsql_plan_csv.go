@@ -20,14 +20,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/logtags"
@@ -44,6 +44,8 @@ var _ rowResultWriter = &RowResultWriter{}
 
 // NewRowResultWriter creates a new RowResultWriter.
 func NewRowResultWriter(rowContainer *rowcontainer.RowContainer) *RowResultWriter {
+	// TODO(yuzefovich): consider using disk-backed row container in some cases
+	// (for example, in case of subqueries and apply-joins).
 	return &RowResultWriter{rowContainer: rowContainer}
 }
 
@@ -108,7 +110,7 @@ func makeImportReaderSpecs(
 	format roachpb.IOFileFormat,
 	nodes []roachpb.NodeID,
 	walltime int64,
-	user string,
+	user security.SQLUsername,
 ) []*execinfrapb.ReadImportDataSpec {
 
 	// For each input file, assign it to a node.
@@ -129,7 +131,7 @@ func makeImportReaderSpecs(
 				WalltimeNanos: walltime,
 				Uri:           make(map[int32]string),
 				ResumePos:     make(map[int32]int64),
-				User:          user,
+				UserProto:     user.EncodeProto(),
 			}
 			inputSpecs = append(inputSpecs, spec)
 		}
@@ -156,7 +158,7 @@ func presplitTableBoundaries(
 	expirationTime := cfg.DB.Clock().Now().Add(time.Hour.Nanoseconds(), 0)
 	for _, tbl := range tables {
 		// TODO(ajwerner): Consider passing in the wrapped descriptors.
-		tblDesc := sqlbase.MakeImmutableTableDescriptor(*tbl.Desc)
+		tblDesc := tabledesc.MakeImmutable(*tbl.Desc)
 		for _, span := range tblDesc.AllIndexSpans(cfg.Codec) {
 			if err := cfg.DB.AdminSplit(ctx, span.Key, expirationTime); err != nil {
 				return err
@@ -180,7 +182,7 @@ func presplitTableBoundaries(
 // returned.
 func DistIngest(
 	ctx context.Context,
-	phs PlanHookState,
+	execCtx JobExecContext,
 	job *jobs.Job,
 	tables map[string]*execinfrapb.ReadImportDataSpec_ImportTable,
 	from []string,
@@ -190,21 +192,17 @@ func DistIngest(
 ) (roachpb.BulkOpSummary, error) {
 	ctx = logtags.AddTag(ctx, "import-distsql-ingest", nil)
 
-	dsp := phs.DistSQLPlanner()
-	evalCtx := phs.ExtendedEvalContext()
+	dsp := execCtx.DistSQLPlanner()
+	evalCtx := execCtx.ExtendedEvalContext()
 
-	planCtx, nodes, err := dsp.SetupAllNodesPlanning(ctx, evalCtx, phs.ExecCfg())
+	planCtx, nodes, err := dsp.SetupAllNodesPlanning(ctx, evalCtx, execCtx.ExecCfg())
 	if err != nil {
 		return roachpb.BulkOpSummary{}, err
 	}
 
-	inputSpecs := makeImportReaderSpecs(job, tables, from, format, nodes, walltime, phs.User())
+	inputSpecs := makeImportReaderSpecs(job, tables, from, format, nodes, walltime, execCtx.User())
 
-	gatewayNodeID, err := evalCtx.ExecCfg.NodeID.OptionalNodeIDErr(47970)
-	if err != nil {
-		return roachpb.BulkOpSummary{}, err
-	}
-	p := MakePhysicalPlan(gatewayNodeID)
+	p := planCtx.NewPhysicalPlan()
 
 	// Setup a one-stage plan with one proc per input spec.
 	corePlacement := make([]physicalplan.ProcessorCorePlacement, len(inputSpecs))
@@ -222,7 +220,7 @@ func DistIngest(
 
 	p.PlanToStreamColMap = []int{0, 1}
 
-	dsp.FinalizePlan(planCtx, &p)
+	dsp.FinalizePlan(planCtx, p)
 
 	if err := job.FractionProgressed(ctx,
 		func(ctx context.Context, details jobspb.ProgressDetails) float32 {
@@ -282,8 +280,10 @@ func DistIngest(
 		return nil
 	})
 
-	if err := presplitTableBoundaries(ctx, phs.ExecCfg(), tables); err != nil {
-		return roachpb.BulkOpSummary{}, err
+	if evalCtx.Codec.ForSystemTenant() {
+		if err := presplitTableBoundaries(ctx, execCtx.ExecCfg(), tables); err != nil {
+			return roachpb.BulkOpSummary{}, err
+		}
 	}
 
 	recv := MakeDistSQLReceiver(
@@ -292,7 +292,7 @@ func DistIngest(
 		tree.Rows,
 		nil, /* rangeCache */
 		nil, /* txn - the flow does not read or write the database */
-		func(ts hlc.Timestamp) {},
+		nil, /* clockUpdater */
 		evalCtx.Tracing,
 	)
 	defer recv.Release()
@@ -321,7 +321,7 @@ func DistIngest(
 		defer close(stopProgress)
 		// Copy the evalCtx, as dsp.Run() might change it.
 		evalCtxCopy := *evalCtx
-		dsp.Run(planCtx, nil, &p, recv, &evalCtxCopy, nil /* finishedSetupFn */)()
+		dsp.Run(planCtx, nil, p, recv, &evalCtxCopy, nil /* finishedSetupFn */)()
 		return rowResultWriter.Err()
 	})
 

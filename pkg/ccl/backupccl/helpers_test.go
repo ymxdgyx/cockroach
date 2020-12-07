@@ -11,6 +11,7 @@ package backupccl
 import (
 	"context"
 	gosql "database/sql"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -51,6 +52,7 @@ func backupRestoreTestSetupWithParams(
 	dir, dirCleanupFn := testutils.TempDir(t)
 	params.ServerArgs.ExternalIODir = dir
 	params.ServerArgs.UseDatabase = "data"
+
 	tc = testcluster.StartTestCluster(t, clusterSize, params)
 	init(tc)
 
@@ -93,9 +95,13 @@ func BackupRestoreTestSetup(
 }
 
 func backupRestoreTestSetupEmpty(
-	t testing.TB, clusterSize int, tempDir string, init func(*testcluster.TestCluster),
+	t testing.TB,
+	clusterSize int,
+	tempDir string,
+	init func(*testcluster.TestCluster),
+	params base.TestClusterArgs,
 ) (ctx context.Context, tc *testcluster.TestCluster, sqlDB *sqlutils.SQLRunner, cleanup func()) {
-	return backupRestoreTestSetupEmptyWithParams(t, clusterSize, tempDir, init, base.TestClusterArgs{})
+	return backupRestoreTestSetupEmptyWithParams(t, clusterSize, tempDir, init, params)
 }
 
 func verifyBackupRestoreStatementResult(
@@ -248,4 +254,44 @@ func createEmptyCluster(
 	}
 
 	return sqlDB, dir, cleanupFn
+}
+
+// getStatsQuery returns a SQL query that will return the properties of the
+// statistics on a table that are expected to remain the same after being
+// restored on a new cluster.
+func getStatsQuery(tableName string) string {
+	return fmt.Sprintf(`SELECT
+	  statistics_name,
+	  column_names,
+	  row_count,
+	  distinct_count,
+	  null_count
+	FROM [SHOW STATISTICS FOR TABLE %s]`, tableName)
+}
+
+// injectStats directly injects some arbitrary statistic into a given table for
+// a specified column.
+// See injectStatsWithRowCount.
+func injectStats(
+	t *testing.T, sqlDB *sqlutils.SQLRunner, tableName string, columnName string,
+) [][]string {
+	return injectStatsWithRowCount(t, sqlDB, tableName, columnName, 100 /* rowCount */)
+}
+
+// injectStatsWithRowCount directly injects some statistics specifying some row
+// count for a column in the given table.
+// N.B. This should be used in backup testing over CREATE STATISTICS since it
+// ensures that the stats cache will be up to date during a subsequent BACKUP.
+func injectStatsWithRowCount(
+	t *testing.T, sqlDB *sqlutils.SQLRunner, tableName string, columnName string, rowCount int,
+) [][]string {
+	sqlDB.Exec(t, fmt.Sprintf(`ALTER TABLE %s INJECT STATISTICS '[
+	{
+		"columns": ["%s"],
+		"created_at": "2018-01-01 1:00:00.00000+00:00",
+		"row_count": %d,
+		"distinct_count": %d
+	}
+	]'`, tableName, columnName, rowCount, rowCount))
+	return sqlDB.QueryStr(t, getStatsQuery(tableName))
 }

@@ -124,13 +124,15 @@ func DatumToHLC(evalCtx *EvalContext, stmtTimestamp time.Time, d Datum) (hlc.Tim
 	case *DInterval:
 		ts.WallTime = duration.Add(stmtTimestamp, d.Duration).UnixNano()
 	default:
-		convErr = errors.Errorf("expected timestamp, decimal, or interval, got %s (%T)", d.ResolvedType(), d)
+		convErr = errors.WithSafeDetails(
+			errors.Errorf("expected timestamp, decimal, or interval, got %s", d.ResolvedType()),
+			"go type: %T", d)
 	}
 	if convErr != nil {
 		return ts, convErr
 	}
 	zero := hlc.Timestamp{}
-	if ts == zero {
+	if ts.EqOrdering(zero) {
 		return ts, errors.Errorf("zero timestamp is invalid")
 	} else if ts.Less(zero) {
 		return ts, errors.Errorf("timestamp before 1970-01-01T00:00:00Z is invalid")

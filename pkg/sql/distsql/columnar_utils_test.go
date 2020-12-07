@@ -16,6 +16,7 @@ import (
 	"math"
 	"math/rand"
 	"strconv"
+	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
@@ -28,9 +29,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -46,8 +47,7 @@ type verifyColOperatorArgs struct {
 	// with caution and leave a comment that justifies using this knob.
 	colIdxsToCheckForEquality []int
 	inputTypes                [][]*types.T
-	inputs                    []sqlbase.EncDatumRows
-	outputTypes               []*types.T
+	inputs                    []rowenc.EncDatumRows
 	pspec                     *execinfrapb.ProcessorSpec
 	// forceDiskSpill, if set, will force the operator to spill to disk.
 	forceDiskSpill bool
@@ -68,7 +68,7 @@ type verifyColOperatorArgs struct {
 
 // verifyColOperator passes inputs through both the processor defined by pspec
 // and the corresponding columnar operator and verifies that the results match.
-func verifyColOperator(args verifyColOperatorArgs) error {
+func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 	const floatPrecision = 0.0000001
 	rng := args.rng
 	if rng == nil {
@@ -83,7 +83,7 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
-	tempEngine, tempFS, err := storage.NewTempEngine(ctx, storage.DefaultStorageEngine, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+	tempEngine, tempFS, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
 	if err != nil {
 		return err
 	}
@@ -138,8 +138,11 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 		Spec:                args.pspec,
 		Inputs:              columnarizers,
 		StreamingMemAccount: &acc,
-		DiskQueueCfg:        colcontainer.DiskQueueCfg{FS: tempFS},
-		FDSemaphore:         colexecbase.NewTestingSemaphore(256),
+		DiskQueueCfg: colcontainer.DiskQueueCfg{
+			FS:        tempFS,
+			GetPather: colcontainer.GetPatherFunc(func(context.Context) string { return "" }),
+		},
+		FDSemaphore: colexecbase.NewTestingSemaphore(256),
 
 		// TODO(yuzefovich): adjust expression generator to not produce
 		// mixed-type timestamp-related expressions and then disallow the
@@ -168,11 +171,11 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 		flowCtx,
 		int32(len(args.inputs))+2,
 		result.Op,
-		args.outputTypes,
+		args.pspec.ResultTypes,
 		nil, /* output */
 		result.MetadataSources,
 		result.ToClose,
-		nil, /* outputStatsToTrace */
+		nil, /* execStatsForTrace */
 		nil, /* cancelFlow */
 	)
 	if err != nil {
@@ -184,10 +187,10 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 	defer outProc.ConsumerClosed()
 	defer outColOp.ConsumerClosed()
 
-	printRowForChecking := func(r sqlbase.EncDatumRow) []string {
-		res := make([]string, len(args.outputTypes))
+	printRowForChecking := func(r rowenc.EncDatumRow) []string {
+		res := make([]string, len(args.pspec.ResultTypes))
 		for i, col := range r {
-			res[i] = col.String(args.outputTypes[i])
+			res[i] = col.String(args.pspec.ResultTypes[i])
 		}
 		return res
 	}
@@ -295,7 +298,7 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 
 	colIdxsToCheckForEquality := args.colIdxsToCheckForEquality
 	if len(colIdxsToCheckForEquality) == 0 {
-		colIdxsToCheckForEquality = make([]int, len(args.outputTypes))
+		colIdxsToCheckForEquality = make([]int, len(args.pspec.ResultTypes))
 		for i := range colIdxsToCheckForEquality {
 			colIdxsToCheckForEquality[i] = i
 		}
@@ -310,7 +313,7 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 				}
 				foundDifference := false
 				for _, colIdx := range colIdxsToCheckForEquality {
-					match, err := datumsMatch(expStrRow[colIdx], retStrRow[colIdx], args.outputTypes[colIdx])
+					match, err := datumsMatch(expStrRow[colIdx], retStrRow[colIdx], args.pspec.ResultTypes[colIdx])
 					if err != nil {
 						return errors.Errorf("error while parsing datum in rows\n%v\n%v\n%s",
 							expStrRow, retStrRow, err.Error())
@@ -337,7 +340,7 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 			retStrRow := colOpRows[i]
 			// anyOrder is false, so the result rows must match in the same order.
 			for _, colIdx := range colIdxsToCheckForEquality {
-				match, err := datumsMatch(expStrRow[colIdx], retStrRow[colIdx], args.outputTypes[colIdx])
+				match, err := datumsMatch(expStrRow[colIdx], retStrRow[colIdx], args.pspec.ResultTypes[colIdx])
 				if err != nil {
 					return errors.Errorf("error while parsing datum in rows\n%v\n%v\n%s",
 						expStrRow, retStrRow, err.Error())

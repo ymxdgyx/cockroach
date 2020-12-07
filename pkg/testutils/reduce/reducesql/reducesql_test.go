@@ -41,18 +41,22 @@ func isInterestingSQL(contains string) reduce.InterestingFn {
 		args := base.TestServerArgs{
 			Insecure: true,
 		}
-		server := server.TestServerFactory.New(args).(*server.TestServer)
-		if err := server.Start(args); err != nil {
+		ts, err := server.TestServerFactory.New(args)
+		if err != nil {
 			panic(err)
 		}
-		defer server.Stopper().Stop(ctx)
+		serv := ts.(*server.TestServer)
+		defer serv.Stopper().Stop(ctx)
+		if err := serv.Start(); err != nil {
+			panic(err)
+		}
 
 		options := url.Values{}
 		options.Add("sslmode", "disable")
 		url := url.URL{
 			Scheme:   "postgres",
 			User:     url.User(security.RootUser),
-			Host:     server.ServingSQLAddr(),
+			Host:     serv.ServingSQLAddr(),
 			RawQuery: options.Encode(),
 		}
 

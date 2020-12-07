@@ -150,12 +150,18 @@ export interface LoginAPIState {
   loggedInUser: string;
   error: Error;
   inProgress: boolean;
+  oidcAutoLogin: boolean;
+  oidcLoginEnabled: boolean;
+  oidcButtonText: string;
 }
 
 export const emptyLoginState: LoginAPIState = {
   loggedInUser: dataFromServer.LoggedInUser,
   error: null,
   inProgress: false,
+  oidcAutoLogin: dataFromServer.OIDCAutoLogin,
+  oidcLoginEnabled: dataFromServer.OIDCLoginEnabled,
+  oidcButtonText: dataFromServer.OIDCButtonText,
 };
 
 // Actions
@@ -244,24 +250,28 @@ export function loginReducer(state = emptyLoginState, action: Action): LoginAPIS
   switch (action.type) {
     case LOGIN_BEGIN:
       return {
+        ...state,
         loggedInUser: null,
         error: null,
         inProgress: true,
       };
     case LOGIN_SUCCESS:
       return {
+        ...state,
         loggedInUser: (action as LoginSuccessAction).loggedInUser,
         inProgress: false,
         error: null,
       };
     case LOGIN_FAILURE:
       return {
+        ...state,
         loggedInUser: null,
         inProgress: false,
         error: (action as LoginFailureAction).error,
       };
     case LOGOUT_BEGIN:
       return {
+        ...state,
         loggedInUser: state.loggedInUser,
         inProgress: true,
         error: null,

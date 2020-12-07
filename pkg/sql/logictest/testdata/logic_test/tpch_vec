@@ -567,8 +567,7 @@ EXPLAIN (VEC) SELECT s_acctbal, s_name, n_name, p_partkey, p_mfgr, s_address, s_
             │       └ *colexec.selEQBytesBytesConstOp
             │         └ *colfetcher.ColBatchScan
             └ *rowexec.joinReader
-              └ *colexec.mergeJoinInnerOp
-                ├ *colfetcher.ColBatchScan
+              └ *rowexec.joinReader
                 └ *colexec.selEQBytesBytesConstOp
                   └ *colfetcher.ColBatchScan
 
@@ -632,8 +631,12 @@ EXPLAIN (VEC) SELECT sum(l_extendedprice * l_discount) AS revenue FROM lineitem 
 └ Node 1
   └ *colexec.orderedAggregator
     └ *colexec.distinctChainOps
-      └ *rowexec.joinReader
-        └ *colfetcher.ColBatchScan
+      └ *colexec.projMultFloat64Float64Op
+        └ *colexec.selLTFloat64Float64ConstOp
+          └ *colexec.selLEFloat64Float64ConstOp
+            └ *colexec.selGEFloat64Float64ConstOp
+              └ *rowexec.joinReader
+                └ *colfetcher.ColBatchScan
 
 # Query 7
 query T
@@ -691,8 +694,7 @@ EXPLAIN (VEC) SELECT o_year, sum(CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 
           │           │ ├ *colfetcher.ColBatchScan
           │           │ └ *colexec.hashJoiner
           │           │   ├ *rowexec.joinReader
-          │           │   │ └ *colexec.mergeJoinInnerOp
-          │           │   │   ├ *colfetcher.ColBatchScan
+          │           │   │ └ *rowexec.joinReader
           │           │   │   └ *colexec.selEQBytesBytesConstOp
           │           │   │     └ *colfetcher.ColBatchScan
           │           │   └ *rowexec.joinReader
@@ -777,8 +779,11 @@ EXPLAIN (VEC) SELECT l_shipmode, sum(CASE WHEN o_orderpriority = '1-URGENT' or o
   └ *colexec.sortOp
     └ *colexec.hashAggregator
       └ *rowexec.joinReader
-        └ *rowexec.joinReader
-          └ *colfetcher.ColBatchScan
+        └ *colexec.selLTInt64Int64Op
+          └ *colexec.selLTInt64Int64Op
+            └ *colexec.selectInOpBytes
+              └ *rowexec.joinReader
+                └ *colfetcher.ColBatchScan
 
 # Query 13
 query T

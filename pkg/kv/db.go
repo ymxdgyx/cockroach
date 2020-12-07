@@ -133,7 +133,7 @@ type Result struct {
 	// Keys is set by some operations instead of returning the rows themselves.
 	Keys []roachpb.Key
 
-	// ResumeSpan is the the span to be used on the next operation in a
+	// ResumeSpan is the span to be used on the next operation in a
 	// sequence of operations. It is returned whenever an operation over a
 	// span of keys is bounded and the operation returns before completely
 	// running over the span. It allows the operation to be called again with
@@ -188,7 +188,7 @@ func DefaultDBContext(stopper *stop.Stopper) DBContext {
 	return DBContext{
 		UserPriority: roachpb.NormalUserPriority,
 		// TODO(tbg): this is ugly. Force callers to pass in an SQLIDContainer.
-		NodeID:  base.NewSQLIDContainer(0, &c, true /* exposed */),
+		NodeID:  base.NewSQLIDContainer(0, &c),
 		Stopper: stopper,
 	}
 }

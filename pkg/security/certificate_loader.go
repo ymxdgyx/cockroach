@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/errors/oserror"
 )
 
 func init() {
@@ -123,6 +124,8 @@ func (p PemUsage) String() string {
 		return "UI"
 	case ClientPem:
 		return "Client"
+	case TenantClientPem:
+		return "Tenant Client"
 	default:
 		return "unknown"
 	}
@@ -274,7 +277,7 @@ func (cl *CertificateLoader) MaybeCreateCertsDir() error {
 		return nil
 	}
 
-	if !os.IsNotExist(err) {
+	if !oserror.IsNotExist(err) {
 		return makeErrorf(err, "could not stat certs directory %s", cl.certsDir)
 	}
 
@@ -296,7 +299,7 @@ func (cl *CertificateLoader) TestDisablePermissionChecks() {
 func (cl *CertificateLoader) Load() error {
 	fileInfos, err := assetLoaderImpl.ReadDir(cl.certsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if oserror.IsNotExist(err) {
 			// Directory does not exist.
 			if log.V(3) {
 				log.Infof(context.Background(), "missing certs directory %s", cl.certsDir)
@@ -470,7 +473,7 @@ func validateDualPurposeNodeCert(ci *CertInfo) error {
 	// The first certificate is used in client auth.
 	cert := ci.ParsedCertificates[0]
 	principals := getCertificatePrincipals(cert)
-	if !ContainsUser(NodeUser, principals) {
+	if !Contains(principals, NodeUser) {
 		return errors.Errorf("client/server node certificate has principals %q, expected %q",
 			principals, NodeUser)
 	}
@@ -489,7 +492,7 @@ func validateCockroachCertificate(ci *CertInfo, cert *x509.Certificate) error {
 	case ClientPem:
 		// Check that CommonName matches the username extracted from the filename.
 		principals := getCertificatePrincipals(cert)
-		if !ContainsUser(ci.Name, principals) {
+		if !Contains(principals, ci.Name) {
 			return errors.Errorf("client certificate has principals %q, expected %q",
 				principals, ci.Name)
 		}

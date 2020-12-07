@@ -15,15 +15,15 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
-	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/optional"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // sorter sorts the input rows according to the specified ordering.
@@ -31,7 +31,7 @@ type sorterBase struct {
 	execinfra.ProcessorBase
 
 	input    execinfra.RowSource
-	ordering sqlbase.ColumnOrdering
+	ordering colinfo.ColumnOrdering
 	matchLen uint32
 
 	rows rowcontainer.SortableRowContainer
@@ -49,14 +49,14 @@ func (s *sorterBase) init(
 	input execinfra.RowSource,
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
-	ordering sqlbase.ColumnOrdering,
+	ordering colinfo.ColumnOrdering,
 	matchLen uint32,
 	opts execinfra.ProcStateOpts,
 ) error {
 	ctx := flowCtx.EvalCtx.Ctx()
-	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(ctx); sp != nil && sp.IsRecording() {
 		input = newInputStatCollector(input)
-		s.FinishTrace = s.outputStatsToTrace
+		s.ExecStatsForTrace = s.execStatsForTrace
 	}
 
 	// Limit the memory use by creating a child monitor with a hard limit.
@@ -78,7 +78,6 @@ func (s *sorterBase) init(
 		flowCtx.Cfg.TempStorage,
 		memMonitor,
 		s.diskMonitor,
-		0, /* rowCapacity */
 	)
 	s.rows = &rc
 
@@ -91,7 +90,7 @@ func (s *sorterBase) init(
 // Next is part of the RowSource interface. It is extracted into sorterBase
 // because this implementation of next is shared between the sortAllProcessor
 // and the sortTopKProcessor.
-func (s *sorterBase) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (s *sorterBase) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for s.State == execinfra.StateRunning {
 		if ok, err := s.i.Valid(); err != nil || !ok {
 			s.MoveToDraining(err)
@@ -127,51 +126,19 @@ func (s *sorterBase) close() {
 	}
 }
 
-var _ execinfrapb.DistSQLSpanStats = &SorterStats{}
-
-const sorterTagPrefix = "sorter."
-
-// Stats implements the SpanStats interface.
-func (ss *SorterStats) Stats() map[string]string {
-	statsMap := ss.InputStats.Stats(sorterTagPrefix)
-	statsMap[sorterTagPrefix+MaxMemoryTagSuffix] = humanizeutil.IBytes(ss.MaxAllocatedMem)
-	statsMap[sorterTagPrefix+MaxDiskTagSuffix] = humanizeutil.IBytes(ss.MaxAllocatedDisk)
-	return statsMap
-}
-
-// StatsForQueryPlan implements the DistSQLSpanStats interface.
-func (ss *SorterStats) StatsForQueryPlan() []string {
-	stats := ss.InputStats.StatsForQueryPlan("" /* prefix */)
-
-	if ss.MaxAllocatedMem != 0 {
-		stats = append(stats,
-			fmt.Sprintf("%s: %s", MaxMemoryQueryPlanSuffix, humanizeutil.IBytes(ss.MaxAllocatedMem)))
-	}
-
-	if ss.MaxAllocatedDisk != 0 {
-		stats = append(stats,
-			fmt.Sprintf("%s: %s", MaxDiskQueryPlanSuffix, humanizeutil.IBytes(ss.MaxAllocatedDisk)))
-	}
-
-	return stats
-}
-
-// outputStatsToTrace outputs the collected sorter stats to the trace. Will fail
-// silently if stats are not being collected.
-func (s *sorterBase) outputStatsToTrace() {
-	is, ok := getInputStats(s.FlowCtx, s.input)
+// execStatsForTrace implements ProcessorBase.ExecStatsForTrace.
+func (s *sorterBase) execStatsForTrace() *execinfrapb.ComponentStats {
+	is, ok := getInputStats(s.input)
 	if !ok {
-		return
+		return nil
 	}
-	if sp := opentracing.SpanFromContext(s.Ctx); sp != nil {
-		tracing.SetSpanStats(
-			sp,
-			&SorterStats{
-				InputStats:       is,
-				MaxAllocatedMem:  s.MemMonitor.MaximumBytes(),
-				MaxAllocatedDisk: s.diskMonitor.MaximumBytes(),
-			},
-		)
+	return &execinfrapb.ComponentStats{
+		Inputs: []execinfrapb.InputStats{is},
+		Exec: execinfrapb.ExecStats{
+			MaxAllocatedMem:  optional.MakeUint(uint64(s.MemMonitor.MaximumBytes())),
+			MaxAllocatedDisk: optional.MakeUint(uint64(s.diskMonitor.MaximumBytes())),
+		},
+		Output: s.Out.Stats(),
 	}
 }
 
@@ -185,17 +152,12 @@ func newSorter(
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
 	count := uint64(0)
-	if post.Limit != 0 && post.Filter.Empty() {
+	if post.Limit != 0 {
 		// The sorter needs to produce Offset + Limit rows. The ProcOutputHelper
 		// will discard the first Offset ones.
-		// LIMIT and OFFSET should each never be greater than math.MaxInt64, the
-		// parser ensures this.
-		if post.Limit > math.MaxInt64 || post.Offset > math.MaxInt64 {
-			return nil, errors.AssertionFailedf(
-				"error creating sorter: limit %d offset %d too large",
-				errors.Safe(post.Limit), errors.Safe(post.Offset))
+		if post.Limit <= math.MaxUint64-post.Offset {
+			count = post.Limit + post.Offset
 		}
-		count = post.Limit + post.Offset
 	}
 
 	// Choose the optimal processor.
@@ -309,11 +271,6 @@ func (s *sortAllProcessor) fill() (ok bool, _ error) {
 	s.i = s.rows.NewFinalIterator(ctx)
 	s.i.Rewind()
 	return true, nil
-}
-
-// ConsumerDone is part of the RowSource interface.
-func (s *sortAllProcessor) ConsumerDone() {
-	s.input.ConsumerDone()
 }
 
 // ConsumerClosed is part of the RowSource interface.
@@ -431,11 +388,6 @@ func (s *sortTopKProcessor) Start(ctx context.Context) context.Context {
 	return ctx
 }
 
-// ConsumerDone is part of the RowSource interface.
-func (s *sortTopKProcessor) ConsumerDone() {
-	s.input.ConsumerDone()
-}
-
 // ConsumerClosed is part of the RowSource interface.
 func (s *sortTopKProcessor) ConsumerClosed() {
 	// The consumer is done, Next() will not be called again.
@@ -447,11 +399,11 @@ func (s *sortTopKProcessor) ConsumerClosed() {
 type sortChunksProcessor struct {
 	sorterBase
 
-	alloc sqlbase.DatumAlloc
+	alloc rowenc.DatumAlloc
 
 	// sortChunksProcessor accumulates rows that are equal on a prefix, until it
 	// encounters a row that is greater. It stores that greater row in nextChunkRow
-	nextChunkRow sqlbase.EncDatumRow
+	nextChunkRow rowenc.EncDatumRow
 }
 
 var _ execinfra.Processor = &sortChunksProcessor{}
@@ -489,7 +441,7 @@ func newSortChunksProcessor(
 // chunkCompleted is a helper function that determines if the given row shares the same
 // values for the first matchLen ordering columns with the given prefix.
 func (s *sortChunksProcessor) chunkCompleted(
-	nextChunkRow, prefix sqlbase.EncDatumRow,
+	nextChunkRow, prefix rowenc.EncDatumRow,
 ) (bool, error) {
 	types := s.input.OutputTypes()
 	for _, ord := range s.ordering[:s.matchLen] {
@@ -578,7 +530,7 @@ func (s *sortChunksProcessor) Start(ctx context.Context) context.Context {
 }
 
 // Next is part of the RowSource interface.
-func (s *sortChunksProcessor) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (s *sortChunksProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	ctx := s.Ctx
 	for s.State == execinfra.StateRunning {
 		ok, err := s.i.Valid()

@@ -20,6 +20,7 @@ import "gogoproto/gogo.proto";
 // node topology, store type, and machine capabilities.
 message Attributes {
   option (gogoproto.goproto_stringer) = false;
+  option (gogoproto.equal) = true;
 
   repeated string attrs = 1 [(gogoproto.moretags) = "yaml:\"attrs,flow\""];
 }
@@ -83,10 +84,28 @@ enum ReplicaType {
   // count towards the quorum(s). Candidates will not ask for (or take into
   // account) votes of (peers they consider) LEARNERs for leadership nor do
   // their acknowledged log entries get taken into account for determining the
-  // committed index. At the time of writing, learners in CockroachDB are a
-  // short-term transient state: a replica being added and on its way to being a
-  // VOTER_{FULL,INCOMING}, or a VOTER_DEMOTING being removed.
+  // committed index. Learners in CockroachDB are a short-term transient state:
+  // a replica being added and on its way to being a VOTER_{FULL,INCOMING}, or a
+  // VOTER_DEMOTING being removed.
+  //
+  // Note that once these replicas upreplicate after receiving their initial
+  // snapshot, they will count towards the raft leader's quota pool and throttle
+  // incoming proposals if they fall "too far behind".
   LEARNER = 1;
+  // NON_VOTER indicates a replica that applies committed entries, but does not
+  // count towards the quorum(s). Candidates will not ask for (or take into
+  // account) votes of (peers they consider) NON_VOTERs for leadership nor do
+  // their acknowledged log entries get taken into account for determining the
+  // committed index.
+  //
+  // Under the hood, it is based on an etcd/raft LearnerNode, like the LEARNER
+  // replica type defined above. They will also cause the quota pool on the
+  // leader to throttle incoming proposals if they fall behind.
+  //
+  // Unlike LEARNERs, these are a persistent state meant to serve user traffic
+  // via follower reads. See comment above ReplicaDescriptors.NonVoters() for
+  // differences in how LEARNERs and NON_VOTERs are handled internally.
+  NON_VOTER = 5;
 }
 
 // ReplicaDescriptor describes a replica location by node ID
@@ -126,13 +145,23 @@ message ReplicaIdent {
 // A range is described using an inclusive start key, a non-inclusive end key,
 // and a list of replicas where the range is stored.
 //
-// NOTE: Care must be taken when changing the encoding of this proto
-// because it is used as part of conditional put operations.
+// NOTE: Care must be taken when adding or removing fields from this proto
+// because we have code relies on the descriptor comparing Equal() after
+// round-tripping through a previous/next version node (i.e. in mixed-version
+// clusters). Note that we don't need to proto encoding to be stable since, when
+// doing CPuts we use the raw bytes we've read from the DB as the expected value
+// (instead of re-marshaling the proto), but unfortunately we also need the
+// Equal() method to work. Also note that we configure our protos to not
+// maintain unrecognized fields.
+//
 // TODO(jeffreyxiao): All nullable fields in RangeDescriptor can be made
 // non-nullable if #38302 is guaranteed to be on all nodes (I.E. 20.1).
 message RangeDescriptor {
   option (gogoproto.goproto_stringer) = false;
-  option (gogoproto.equal) = true;
+  // We implement the Equal method by hand so that it can ignore deprecated
+  // fields. This can be reverted in 21.1 once the "previous version" no longer
+  // populates deprecated_generation_comparable.
+  option (gogoproto.equal) = false;
   option (gogoproto.populate) = true;
 
   optional int64 range_id = 1 [(gogoproto.nullable) = false,
@@ -217,6 +246,13 @@ message RangeDescriptor {
   // replica is gc'able or not. If it is not gc'able, then by definition the
   // replica applying the merge is.
   optional int64 generation = 6 [(gogoproto.nullable) = false, (gogoproto.casttype) = "RangeGeneration"];
+
+  // This field is not used any more, but we need to maintain it in 20.2 because
+  // 20.1 nodes need descriptors to round-trip through 20.2 nodes and compare
+  // Equal() when they come back. 20.2 nodes know to ignore this field when
+  // comparing, so the field can be removed in 21.1.
+  optional bool deprecated_generation_comparable = 8;
+
   // The presence of the sticky_bit indicates that the range should not be
   // automatically merged by the merge queue with the range to its left. It is
   // set during a split operation and unset during an unsplit operation. Note
@@ -233,8 +269,6 @@ message RangeDescriptor {
   // queue is enabled. With sticky_bit, users can manually split ranges without
   // diabling the merge queue.
   optional util.hlc.Timestamp sticky_bit = 7;
-
-  reserved 8;
 }
 
 // Percentiles contains a handful of hard-coded percentiles meant to summarize
@@ -288,6 +322,7 @@ message StoreCapacity {
 
 // NodeDescriptor holds details on node physical/network topology.
 message NodeDescriptor {
+  option (gogoproto.equal) = true;
   optional int32 node_id = 1 [(gogoproto.nullable) = false,
       (gogoproto.customname) = "NodeID", (gogoproto.casttype) = "NodeID"];
   optional util.UnresolvedAddr address = 2 [(gogoproto.nullable) = false];
@@ -302,14 +337,12 @@ message NodeDescriptor {
   // is also used to accept SQL connections.
   optional util.UnresolvedAddr sql_address = 10 [(gogoproto.nullable) = false, 
       (gogoproto.customname) = "SQLAddress"];
-  // The tenant KV address. If empty, indicates that the base address
-  // field is also used to accept tenant KV connections.
-  optional util.UnresolvedAddr tenant_address = 11 [(gogoproto.nullable) = false];
 }
 
 // LocalityAddress holds the private address accessible only from other nodes
 // in the corresponding locality.
 message LocalityAddress {
+  option (gogoproto.equal) = true;
   optional util.UnresolvedAddr address = 1 [(gogoproto.nullable) = false];
   optional Tier locality_tier = 2 [(gogoproto.nullable) = false];
 }
@@ -336,6 +369,7 @@ message StoreDeadReplicas {
 // Locality is an ordered set of key value Tiers that describe a node's
 // location. The tier keys should be the same across all nodes.
 message Locality {
+  option (gogoproto.equal) = true;
   option (gogoproto.goproto_stringer) = false;
 
   repeated Tier tiers = 1 [(gogoproto.nullable) = false];
@@ -343,6 +377,7 @@ message Locality {
 
 // Tier represents one level of the locality hierarchy.
 message Tier {
+  option (gogoproto.equal) = true;
   option (gogoproto.goproto_stringer) = false;
 
   // Key is the name of tier and should match all other nodes.
@@ -352,6 +387,7 @@ message Tier {
 }
 
 message Version {
+  option (gogoproto.equal) = true;
   option (gogoproto.goproto_stringer) = false;
 
   // The names "major" and "minor" are reserved in C in
@@ -361,8 +397,9 @@ message Version {
   optional int32 minor_val = 2 [(gogoproto.nullable) = false, (gogoproto.customname) = "Minor"];
   // Note that patch is a placeholder and will always be zero.
   optional int32 patch = 3 [(gogoproto.nullable) = false];
-  // The unstable version is used to migrate during development.
-  // Users of stable, public releases will only use binaries
-  // with unstable set to 0.
-  optional int32 unstable = 4 [(gogoproto.nullable) = false];
+  // The internal version is used to introduce migrations during the development
+  // cycle. They are subversions that are never the end versions of a release,
+  // i.e. users of stable, public release will only use binaries with the
+  // internal version set to 0.
+  optional int32 internal = 4 [(gogoproto.nullable) = false];
 }

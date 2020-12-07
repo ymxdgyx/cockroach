@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
+	"github.com/cockroachdb/errors"
 )
 
 // A rangefeed's "resolved timestamp" is defined as the timestamp at which no
@@ -205,7 +206,7 @@ func (rts *resolvedTimestamp) consumeLogicalOp(op enginepb.MVCCLogicalOp) bool {
 		return rts.intentQ.Del(t.TxnID)
 
 	default:
-		panic(fmt.Sprintf("unknown logical op %T", t))
+		panic(errors.AssertionFailedf("unknown logical op %T", t))
 	}
 }
 
@@ -311,7 +312,7 @@ func (h unresolvedTxnHeap) Less(i, j int) bool {
 	// container/heap constructs a min-heap by default, so prioritize the txn
 	// with the smaller timestamp. Break ties by comparing IDs to establish a
 	// total order.
-	if h[i].timestamp == h[j].timestamp {
+	if h[i].timestamp.EqOrdering(h[j].timestamp) {
 		return bytes.Compare(h[i].txnID.GetBytes(), h[j].txnID.GetBytes()) < 0
 	}
 	return h[i].timestamp.Less(h[j].timestamp)

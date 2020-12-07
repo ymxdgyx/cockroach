@@ -105,7 +105,30 @@ eexpect "display_format\ttsv"
 eexpect root@
 end_test
 
+start_test "Check that \\x toggles display format"
+send "\\x\r\\set\r"
+eexpect "Option*|*display_format"
+eexpect "Value*|*records"
+eexpect root@
+
+send "\\x\r\\set\r"
+eexpect "display_format*|*table"
+eexpect root@
+end_test
+
+start_test "Check that \\x with on or off enables/disables records display format"
+send "\\x on\r\\set\r"
+eexpect "Option*|*display_format"
+eexpect "Value*|*records"
+eexpect root@
+
+send "\\x off\r\\set\r"
+eexpect "display_format*|*table"
+eexpect root@
+end_test
+
 start_test "Check various ways to set a boolean flag."
+send "\\set display_format=tsv\r"
 send "\\set show_times=false\r\\set\r"
 eexpect "show_times\tfalse"
 eexpect root@
@@ -221,6 +244,18 @@ eexpect "with no argument"
 eexpect root@
 end_test
 
+start_test "Check that \\echo behaves well."
+send "\\echo\r"
+eexpect "\r\n"
+eexpect "\r\n"
+eexpect root@
+
+send "\\echo hello  world\r"
+# echo removes double spaces within the line. That's expected.
+eexpect "hello world"
+eexpect root@
+end_test
+
 start_test "Check that commands are also recognized with a final semicolon."
 send "\\set;\r"
 eexpect "display_format"
@@ -249,6 +284,8 @@ eexpect "ERROR: at or near"
 eexpect "syntax error"
 eexpect ":/# "
 end_test
+
+stop_server $argv
 
 start_test "Check that client-side options can be overridden with set"
 
@@ -287,5 +324,3 @@ end_test
 
 send "exit 0\r"
 eexpect eof
-
-stop_server $argv

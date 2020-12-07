@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldatatestutils"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecagg"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -29,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/stretchr/testify/require"
@@ -51,10 +53,11 @@ type aggregatorTestCase struct {
 	constArguments [][]execinfrapb.Expression
 	// spec will be populated during init().
 	spec           *execinfrapb.AggregatorSpec
+	aggDistinct    []bool
+	aggFilter      []int
 	input          tuples
 	unorderedInput bool
 	expected       tuples
-	inputBatchSize int
 	name           string
 
 	// convToDecimal will convert any float64s to apd.Decimals. If a string is
@@ -68,6 +71,7 @@ type aggregatorTestCase struct {
 type aggType struct {
 	new func(
 		allocator *colmem.Allocator,
+		memAccount *mon.BoundAccount,
 		input colexecbase.Operator,
 		inputTypes []*types.T,
 		spec *execinfrapb.AggregatorSpec,
@@ -86,6 +90,7 @@ var aggTypes = []aggType{
 		// with orderedAggregator.
 		new: func(
 			allocator *colmem.Allocator,
+			memAccount *mon.BoundAccount,
 			input colexecbase.Operator,
 			inputTypes []*types.T,
 			spec *execinfrapb.AggregatorSpec,
@@ -95,7 +100,7 @@ var aggTypes = []aggType{
 			outputTypes []*types.T,
 			_ bool,
 		) (colexecbase.Operator, error) {
-			return NewHashAggregator(allocator, input, inputTypes, spec, evalCtx, constructors, constArguments, outputTypes)
+			return NewHashAggregator(allocator, memAccount, input, inputTypes, spec, evalCtx, constructors, constArguments, outputTypes)
 		},
 		name: "hash",
 	},
@@ -144,15 +149,19 @@ func (tc *aggregatorTestCase) init() error {
 	if tc.typs == nil {
 		tc.typs = defaultTyps
 	}
-	if tc.inputBatchSize == 0 {
-		tc.inputBatchSize = coldata.BatchSize()
-	}
 	aggregations := make([]execinfrapb.AggregatorSpec_Aggregation, len(tc.aggFns))
 	for i, aggFn := range tc.aggFns {
 		aggregations[i].Func = aggFn
 		aggregations[i].ColIdx = tc.aggCols[i]
 		if tc.constArguments != nil {
 			aggregations[i].Arguments = tc.constArguments[i]
+		}
+		if tc.aggDistinct != nil {
+			aggregations[i].Distinct = tc.aggDistinct[i]
+		}
+		if tc.aggFilter != nil && tc.aggFilter[i] != tree.NoColumnIdx {
+			filterColIdx := uint32(tc.aggFilter[i])
+			aggregations[i].FilterColIdx = &filterColIdx
 		}
 	}
 	tc.spec = &execinfrapb.AggregatorSpec{
@@ -198,8 +207,7 @@ func TestAggregatorOneFunc(t *testing.T) {
 				{4},
 				{5},
 			},
-			inputBatchSize: 2,
-			name:           "MultiGroup",
+			name: "MultiGroup",
 		},
 		{
 			input: tuples{
@@ -213,8 +221,7 @@ func TestAggregatorOneFunc(t *testing.T) {
 				{6},
 				{9},
 			},
-			inputBatchSize: 1,
-			name:           "CarryBetweenInputBatches",
+			name: "CarryBetweenInputBatches",
 		},
 		{
 			input: tuples{
@@ -230,8 +237,7 @@ func TestAggregatorOneFunc(t *testing.T) {
 				{5},
 				{6},
 			},
-			inputBatchSize: 2,
-			name:           "CarryBetweenOutputBatches",
+			name: "CarryBetweenOutputBatches",
 		},
 		{
 			input: tuples{
@@ -257,8 +263,7 @@ func TestAggregatorOneFunc(t *testing.T) {
 				{7},
 				{8},
 			},
-			inputBatchSize: 3,
-			name:           "CarryBetweenInputAndOutputBatches",
+			name: "CarryBetweenInputAndOutputBatches",
 		},
 		{
 			input: tuples{
@@ -270,9 +275,8 @@ func TestAggregatorOneFunc(t *testing.T) {
 			expected: tuples{
 				{10},
 			},
-			inputBatchSize: 1,
-			name:           "NoGroupingCols",
-			groupCols:      []uint32{},
+			name:      "NoGroupingCols",
+			groupCols: []uint32{},
 		},
 		{
 			input: tuples{
@@ -284,11 +288,10 @@ func TestAggregatorOneFunc(t *testing.T) {
 			expected: tuples{
 				{10},
 			},
-			inputBatchSize: 1,
-			name:           "UnusedInputColumns",
-			typs:           []*types.T{types.Int, types.Int, types.Int},
-			groupCols:      []uint32{1, 2},
-			aggCols:        [][]uint32{{0}},
+			name:      "UnusedInputColumns",
+			typs:      []*types.T{types.Int, types.Int, types.Int},
+			groupCols: []uint32{1, 2},
+			aggCols:   [][]uint32{{0}},
 		},
 		{
 			input: tuples{
@@ -344,40 +347,21 @@ func TestAggregatorOneFunc(t *testing.T) {
 		if err := tc.init(); err != nil {
 			t.Fatal(err)
 		}
-
-		constructors, constArguments, outputTypes, err := ProcessAggregations(
+		constructors, constArguments, outputTypes, err := colexecagg.ProcessAggregations(
 			&evalCtx, nil /* semaCtx */, tc.spec.Aggregations, tc.typs,
 		)
 		require.NoError(t, err)
-		if !tc.unorderedInput {
-			log.Infof(ctx, "%s", tc.name)
-			tupleSource := newOpTestInput(tc.inputBatchSize, tc.input, tc.typs)
-			a, err := NewOrderedAggregator(
-				testAllocator, tupleSource, tc.typs, tc.spec, &evalCtx,
-				constructors, constArguments, outputTypes, false, /* isScalar */
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			out := newOpTestOutput(a, tc.expected)
-			if err := out.VerifyAnyOrder(); err != nil {
-				t.Fatal(err)
-			}
-		}
-
-		// Run randomized tests on this test case.
 		for _, agg := range aggTypes {
 			if tc.unorderedInput && agg.name == "ordered" {
 				// This test case has unordered input, so we skip ordered
 				// aggregator.
 				continue
 			}
-			log.Infof(ctx, "%s/Randomized/%s", tc.name, agg.name)
+			log.Infof(ctx, "%s/%s", tc.name, agg.name)
 			runTestsWithTyps(t, []tuples{tc.input}, [][]*types.T{tc.typs}, tc.expected, unorderedVerifier,
 				func(input []colexecbase.Operator) (colexecbase.Operator, error) {
 					return agg.new(
-						testAllocator, input[0], tc.typs, tc.spec, &evalCtx,
+						testAllocator, testMemAcc, input[0], tc.typs, tc.spec, &evalCtx,
 						constructors, constArguments, outputTypes, false, /* isScalar */
 					)
 				})
@@ -504,10 +488,9 @@ func TestAggregatorMultiFunc(t *testing.T) {
 				{2, 1.0, "1.0", 2.0, 6.0},
 				{2, 2.0, "2.0", 6.0, 6.0},
 			},
-			inputBatchSize: 1,
-			typs:           []*types.T{types.Int, types.Decimal, types.Bytes, types.Decimal},
-			name:           "MultiGroupColsWithPointerTypes",
-			groupCols:      []uint32{0, 1, 2},
+			typs:      []*types.T{types.Int, types.Decimal, types.Bytes, types.Decimal},
+			name:      "MultiGroupColsWithPointerTypes",
+			groupCols: []uint32{0, 1, 2},
 			aggCols: [][]uint32{
 				{0}, {1}, {2}, {3}, {3},
 			},
@@ -593,14 +576,14 @@ func TestAggregatorMultiFunc(t *testing.T) {
 			if err := tc.init(); err != nil {
 				t.Fatal(err)
 			}
-			constructors, constArguments, outputTypes, err := ProcessAggregations(
+			constructors, constArguments, outputTypes, err := colexecagg.ProcessAggregations(
 				&evalCtx, nil /* semaCtx */, tc.spec.Aggregations, tc.typs,
 			)
 			require.NoError(t, err)
 			runTestsWithTyps(t, []tuples{tc.input}, [][]*types.T{tc.typs}, tc.expected, unorderedVerifier,
 				func(input []colexecbase.Operator) (colexecbase.Operator, error) {
 					return agg.new(
-						testAllocator, input[0], tc.typs, tc.spec, &evalCtx,
+						testAllocator, testMemAcc, input[0], tc.typs, tc.spec, &evalCtx,
 						constructors, constArguments, outputTypes, false, /* isScalar */
 					)
 				})
@@ -679,17 +662,137 @@ func TestAggregatorAllFunctions(t *testing.T) {
 			},
 			convToDecimal: true,
 		},
+
+		// Test DISTINCT aggregation.
+		{
+			aggFns: []execinfrapb.AggregatorSpec_Func{
+				execinfrapb.AggregatorSpec_ANY_NOT_NULL,
+				execinfrapb.AggregatorSpec_COUNT,
+				execinfrapb.AggregatorSpec_COUNT,
+				execinfrapb.AggregatorSpec_SUM_INT,
+				execinfrapb.AggregatorSpec_SUM_INT,
+			},
+			aggCols:     [][]uint32{{0}, {1}, {1}, {1}, {1}},
+			aggDistinct: []bool{false, false, true, false, true},
+			typs:        []*types.T{types.Int, types.Int},
+			input: tuples{
+				{0, 1},
+				{0, 2},
+				{0, 2},
+				{0, nil},
+				{0, 1},
+				{0, nil},
+				{1, 1},
+				{1, 2},
+				{1, 2},
+			},
+			expected: tuples{
+				{0, 4, 2, 6, 3},
+				{1, 3, 2, 5, 3},
+			},
+		},
+
+		// Test aggregation with FILTERs.
+		{
+			aggFns: []execinfrapb.AggregatorSpec_Func{
+				execinfrapb.AggregatorSpec_ANY_NOT_NULL,
+				execinfrapb.AggregatorSpec_COUNT_ROWS,
+				execinfrapb.AggregatorSpec_SUM_INT,
+			},
+			aggCols:   [][]uint32{{0}, {}, {1}},
+			aggFilter: []int{tree.NoColumnIdx, 2, 2},
+			typs:      []*types.T{types.Int, types.Int, types.Bool},
+			input: tuples{
+				{0, 1, false},
+				{0, 2, true},
+				{0, 2, true},
+				{0, nil, nil},
+				{0, 1, nil},
+				{0, nil, true},
+				{1, 1, true},
+				{1, 2, nil},
+				{1, 2, true},
+			},
+			expected: tuples{
+				{0, 3, 4},
+				{1, 2, 3},
+			},
+		},
+
+		// Test aggregation with FILTERs when the whole groups are filtered out.
+		{
+			aggFns: []execinfrapb.AggregatorSpec_Func{
+				execinfrapb.AggregatorSpec_ANY_NOT_NULL,
+				execinfrapb.AggregatorSpec_COUNT_ROWS,
+				execinfrapb.AggregatorSpec_SUM_INT,
+			},
+			aggCols:   [][]uint32{{0}, {}, {1}},
+			aggFilter: []int{tree.NoColumnIdx, 2, 2},
+			typs:      []*types.T{types.Int, types.Int, types.Bool},
+			input: tuples{
+				{0, 1, false},
+				{0, nil, nil},
+				{0, 2, false},
+				{1, 1, true},
+				{1, 2, nil},
+				{1, 2, true},
+				{2, 1, false},
+				{2, nil, nil},
+				{2, 2, nil},
+			},
+			expected: tuples{
+				{0, 0, nil},
+				{1, 2, 3},
+				{2, 0, nil},
+			},
+		},
+
+		// Test aggregation with FILTERs and DISTINCTs intertwined.
+		{
+			aggFns: []execinfrapb.AggregatorSpec_Func{
+				execinfrapb.AggregatorSpec_ANY_NOT_NULL,
+				execinfrapb.AggregatorSpec_COUNT,
+				execinfrapb.AggregatorSpec_COUNT,
+				execinfrapb.AggregatorSpec_COUNT,
+				execinfrapb.AggregatorSpec_SUM_INT,
+				execinfrapb.AggregatorSpec_SUM_INT,
+				execinfrapb.AggregatorSpec_SUM_INT,
+			},
+			aggCols:     [][]uint32{{0}, {1}, {1}, {1}, {1}, {1}, {1}},
+			aggDistinct: []bool{false, false, true, true, false, true, true},
+			aggFilter:   []int{tree.NoColumnIdx, 2, tree.NoColumnIdx, 2, 2, tree.NoColumnIdx, 2},
+			typs:        []*types.T{types.Int, types.Int, types.Bool},
+			input: tuples{
+				{0, 1, false},
+				{0, 2, true},
+				{0, 2, true},
+				{0, nil, nil},
+				{0, 1, nil},
+				{0, nil, true},
+				{1, 1, true},
+				{1, 2, nil},
+				{1, 2, true},
+			},
+			expected: tuples{
+				{0, 2, 2, 1, 4, 3, 2},
+				{1, 2, 2, 2, 3, 3, 3},
+			},
+		},
 	}
 
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	defer evalCtx.Stop(context.Background())
 	for _, agg := range aggTypes {
 		for i, tc := range testCases {
+			if agg.name != "hash" && tc.aggFilter != nil {
+				// Filtering aggregation is only supported with hash aggregator.
+				continue
+			}
 			log.Infof(context.Background(), "%s/%d", agg.name, i)
 			if err := tc.init(); err != nil {
 				t.Fatal(err)
 			}
-			constructors, constArguments, outputTypes, err := ProcessAggregations(
+			constructors, constArguments, outputTypes, err := colexecagg.ProcessAggregations(
 				&evalCtx, nil /* semaCtx */, tc.spec.Aggregations, tc.typs,
 			)
 			require.NoError(t, err)
@@ -705,7 +808,7 @@ func TestAggregatorAllFunctions(t *testing.T) {
 				verifier,
 				func(input []colexecbase.Operator) (colexecbase.Operator, error) {
 					return agg.new(
-						testAllocator, input[0], tc.typs, tc.spec, &evalCtx,
+						testAllocator, testMemAcc, input[0], tc.typs, tc.spec, &evalCtx,
 						constructors, constArguments, outputTypes, false, /* isScalar */
 					)
 				})
@@ -812,12 +915,12 @@ func TestAggregatorRandom(t *testing.T) {
 						aggCols:   [][]uint32{{}, {1}, {1}, {1}, {1}, {1}},
 					}
 					require.NoError(t, tc.init())
-					constructors, constArguments, outputTypes, err := ProcessAggregations(
+					constructors, constArguments, outputTypes, err := colexecagg.ProcessAggregations(
 						&evalCtx, nil /* semaCtx */, tc.spec.Aggregations, tc.typs,
 					)
 					require.NoError(t, err)
 					a, err := agg.new(
-						testAllocator, source, tc.typs, tc.spec, &evalCtx,
+						testAllocator, testMemAcc, source, tc.typs, tc.spec, &evalCtx,
 						constructors, constArguments, outputTypes, false, /* isScalar */
 					)
 					if err != nil {
@@ -847,8 +950,15 @@ func benchmarkAggregateFunction(
 	aggFn execinfrapb.AggregatorSpec_Func,
 	aggInputTypes []*types.T,
 	groupSize int,
-	nullProb float64,
+	distinctProb float64,
+	numInputRows int,
 ) {
+	if groupSize > numInputRows {
+		// In this case all tuples will be part of the same group, and we have
+		// likely already benchmarked such scenario with this value of
+		// numInputRows, so we short-circuit.
+		return
+	}
 	rng, _ := randutil.NewPseudoRand()
 	ctx := context.Background()
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
@@ -856,28 +966,33 @@ func benchmarkAggregateFunction(
 	aggMemAcc := evalCtx.Mon.MakeBoundAccount()
 	defer aggMemAcc.Close(ctx)
 	evalCtx.SingleDatumAggMemAccount = &aggMemAcc
-	const numInputBatches = 64
 	const bytesFixedLength = 8
 	typs := append([]*types.T{types.Int}, aggInputTypes...)
-	nTuples := numInputBatches * coldata.BatchSize()
 	cols := make([]coldata.Vec, len(typs))
 	for i := range typs {
-		cols[i] = testAllocator.NewMemColumn(typs[i], nTuples)
+		cols[i] = testAllocator.NewMemColumn(typs[i], numInputRows)
 	}
 	groups := cols[0].Int64()
-	curGroup := -1
-	for i := 0; i < nTuples; i++ {
-		if groupSize == 1 || i%groupSize == 0 {
-			curGroup++
+	if agg.name == "hash" {
+		numGroups := numInputRows / groupSize
+		for i := 0; i < numInputRows; i++ {
+			groups[i] = int64(rng.Intn(numGroups))
 		}
-		groups[i] = int64(curGroup)
+	} else {
+		curGroup := -1
+		for i := 0; i < numInputRows; i++ {
+			if groupSize == 1 || i%groupSize == 0 {
+				curGroup++
+			}
+			groups[i] = int64(curGroup)
+		}
 	}
 	for _, col := range cols[1:] {
 		coldatatestutils.RandomVec(coldatatestutils.RandomVecArgs{
 			Rand:             rng,
 			Vec:              col,
-			N:                nTuples,
-			NullProbability:  nullProb,
+			N:                numInputRows,
+			NullProbability:  0,
 			BytesFixedLength: bytesFixedLength,
 		})
 	}
@@ -890,7 +1005,7 @@ func benchmarkAggregateFunction(
 			vals[i] = vals[i] % 1024
 		}
 	}
-	source := newChunkingBatchSource(typs, cols, nTuples)
+	source := newChunkingBatchSource(typs, cols, numInputRows)
 
 	aggCols := make([]uint32, len(aggInputTypes))
 	for i := range aggCols {
@@ -902,21 +1017,22 @@ func benchmarkAggregateFunction(
 		groupCols: []uint32{0},
 		aggCols:   [][]uint32{aggCols},
 	}
+	if distinctProb > 0 {
+		if !typs[0].Identical(types.Int) {
+			skip.IgnoreLint(b, "benchmarking distinct aggregation is supported only on an INT argument")
+		}
+		tc.aggDistinct = []bool{true}
+		distinctModulo := int64(1.0 / distinctProb)
+		vals := cols[1].Int64()
+		for i := range vals {
+			vals[i] = vals[i] % distinctModulo
+		}
+	}
 	require.NoError(b, tc.init())
-	constructors, constArguments, outputTypes, err := ProcessAggregations(
+	constructors, constArguments, outputTypes, err := colexecagg.ProcessAggregations(
 		&evalCtx, nil /* semaCtx */, tc.spec.Aggregations, tc.typs,
 	)
 	require.NoError(b, err)
-	a, err := agg.new(
-		testAllocator, source, typs, tc.spec, &evalCtx,
-		constructors, constArguments, outputTypes, false, /* isScalar */
-	)
-	if err != nil {
-		skip.IgnoreLint(b)
-	}
-	a.Init()
-
-	b.ResetTimer()
 
 	fName := execinfrapb.AggregatorSpec_Func_name[int32(aggFn)]
 	// Only count the aggregation columns.
@@ -933,18 +1049,43 @@ func benchmarkAggregateFunction(
 		// For COUNT_ROWS we'll just use 8 bytes.
 		argumentsSize = 8
 	}
+	var inputTypesString string
+	switch len(aggInputTypes) {
+	case 1:
+		// Override the string so that the name of the benchmark was the same
+		// as in pre-20.2 releases (which allows us to compare against old
+		// numbers).
+		inputTypesString = aggInputTypes[0].String()
+	default:
+		inputTypesString = fmt.Sprintf("%s", aggInputTypes)
+	}
+	distinctProbString := ""
+	if distinctProb > 0 {
+		distinctProbString = fmt.Sprintf("/distinctProb=%.2f", distinctProb)
+	}
 	b.Run(fmt.Sprintf(
-		"%s/%s/%s/groupSize=%d/hasNulls=%t/numInputBatches=%d",
-		fName, agg.name, aggInputTypes, groupSize, nullProb > 0, numInputBatches),
+		"%s/%s/%s/groupSize=%d%s/numInputRows=%d",
+		fName, agg.name, inputTypesString, groupSize, distinctProbString, numInputRows),
 		func(b *testing.B) {
-			b.SetBytes(int64(argumentsSize * len(aggInputTypes) * nTuples))
+			b.SetBytes(int64(argumentsSize * numInputRows))
+			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				a.(resetter).reset(ctx)
+				a, err := agg.new(
+					testAllocator, testMemAcc, source, typs, tc.spec, &evalCtx,
+					constructors, constArguments, outputTypes, false, /* isScalar */
+				)
+				if err != nil {
+					b.Fatal(err)
+				}
+				a.Init()
 				// Exhaust aggregator until all batches have been read.
 				for b := a.Next(ctx); b.Length() != 0; b = a.Next(ctx) {
 				}
+				if err = a.(colexecbase.Closer).Close(ctx); err != nil {
+					b.Fatal(err)
+				}
+				source.reset(ctx)
 			}
-			require.NoError(b, a.(Closer).Close(ctx))
 		},
 	)
 }
@@ -955,10 +1096,19 @@ func benchmarkAggregateFunction(
 // depending on the parameters of the input.
 func BenchmarkAggregator(b *testing.B) {
 	aggFn := execinfrapb.AggregatorSpec_MIN
+	numRows := []int{1, 32, coldata.BatchSize(), 32 * coldata.BatchSize(), 1024 * coldata.BatchSize()}
+	groupSizes := []int{1, 2, 32, 128, coldata.BatchSize()}
+	if testing.Short() {
+		numRows = []int{32, 32 * coldata.BatchSize()}
+		groupSizes = []int{1, coldata.BatchSize()}
+	}
 	for _, agg := range aggTypes {
-		for _, groupSize := range []int{1, 2, 32, 128, coldata.BatchSize() / 2, coldata.BatchSize()} {
-			for _, nullProb := range []float64{0.0, nullProbability} {
-				benchmarkAggregateFunction(b, agg, aggFn, []*types.T{types.Int}, groupSize, nullProb)
+		for _, numInputRows := range numRows {
+			for _, groupSize := range groupSizes {
+				benchmarkAggregateFunction(
+					b, agg, aggFn, []*types.T{types.Int}, groupSize,
+					0 /* distinctProb */, numInputRows,
+				)
 			}
 		}
 	}
@@ -970,9 +1120,14 @@ func BenchmarkAggregator(b *testing.B) {
 // enough signal on the speeds of aggregate functions. For more diverse
 // configurations look at BenchmarkAggregator.
 func BenchmarkAllOptimizedAggregateFunctions(b *testing.B) {
-	for aggFnNumber := 0; aggFnNumber < len(execinfrapb.AggregatorSpec_Func_name); aggFnNumber++ {
+	var numInputRows = 32 * coldata.BatchSize()
+	numFnsToRun := len(execinfrapb.AggregatorSpec_Func_name)
+	if testing.Short() {
+		numFnsToRun = 1
+	}
+	for aggFnNumber := 0; aggFnNumber < numFnsToRun; aggFnNumber++ {
 		aggFn := execinfrapb.AggregatorSpec_Func(aggFnNumber)
-		if !isAggOptimized(aggFn) {
+		if !colexecagg.IsAggOptimized(aggFn) {
 			continue
 		}
 		for _, agg := range aggTypes {
@@ -987,7 +1142,34 @@ func BenchmarkAllOptimizedAggregateFunctions(b *testing.B) {
 				aggInputTypes = []*types.T{types.Int}
 			}
 			for _, groupSize := range []int{1, coldata.BatchSize()} {
-				benchmarkAggregateFunction(b, agg, aggFn, aggInputTypes, groupSize, nullProbability)
+				benchmarkAggregateFunction(
+					b, agg, aggFn, aggInputTypes, groupSize,
+					0 /* distinctProb */, numInputRows,
+				)
+			}
+		}
+	}
+}
+
+func BenchmarkDistinctAggregation(b *testing.B) {
+	aggFn := execinfrapb.AggregatorSpec_COUNT
+	for _, agg := range aggTypes {
+		for _, numInputRows := range []int{32, 32 * coldata.BatchSize()} {
+			for _, groupSize := range []int{1, 2, 32, 128, coldata.BatchSize()} {
+				for _, distinctProb := range []float64{0.01, 0.1, 1.0} {
+					distinctModulo := int(1.0 / distinctProb)
+					if (groupSize == 1 && distinctProb != 1.0) || float64(groupSize)/float64(distinctModulo) < 0.1 {
+						// We have a such combination of groupSize and distinctProb
+						// parameters that we will be very unlikely to satisfy them
+						// (for example, with groupSize=1 and distinctProb=0.01,
+						// every value will be distinct within the group), so we
+						// skip such configuration.
+						continue
+					}
+					benchmarkAggregateFunction(
+						b, agg, aggFn, []*types.T{types.Int}, groupSize, distinctProb, numInputRows,
+					)
+				}
 			}
 		}
 	}
@@ -1040,9 +1222,9 @@ func TestHashAggregator(t *testing.T) {
 			input: tuples{
 				{0, 3},
 				{0, 4},
-				{HashTableNumBuckets, 6},
+				{coldata.BatchSize(), 6},
 				{0, 5},
-				{HashTableNumBuckets, 7},
+				{coldata.BatchSize(), 7},
 			},
 			typs:      []*types.T{types.Int, types.Int},
 			groupCols: []uint32{0},
@@ -1104,25 +1286,20 @@ func TestHashAggregator(t *testing.T) {
 
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	defer evalCtx.Stop(context.Background())
-	for _, numOfHashBuckets := range []int{0 /* no limit */, 1, coldata.BatchSize()} {
-		for _, tc := range tcs {
-			if err := tc.init(); err != nil {
-				t.Fatal(err)
-			}
-			constructors, constArguments, outputTypes, err := ProcessAggregations(
-				&evalCtx, nil /* semaCtx */, tc.spec.Aggregations, tc.typs,
-			)
-			require.NoError(t, err)
-			log.Infof(context.Background(), "numOfHashBuckets=%d", numOfHashBuckets)
-			runTests(t, []tuples{tc.input}, tc.expected, unorderedVerifier, func(sources []colexecbase.Operator) (colexecbase.Operator, error) {
-				a, err := NewHashAggregator(
-					testAllocator, sources[0], tc.typs, tc.spec, &evalCtx,
-					constructors, constArguments, outputTypes,
-				)
-				a.(*hashAggregator).testingKnobs.numOfHashBuckets = uint64(numOfHashBuckets)
-				return a, err
-			})
+	for _, tc := range tcs {
+		if err := tc.init(); err != nil {
+			t.Fatal(err)
 		}
+		constructors, constArguments, outputTypes, err := colexecagg.ProcessAggregations(
+			&evalCtx, nil /* semaCtx */, tc.spec.Aggregations, tc.typs,
+		)
+		require.NoError(t, err)
+		runTests(t, []tuples{tc.input}, tc.expected, unorderedVerifier, func(sources []colexecbase.Operator) (colexecbase.Operator, error) {
+			return NewHashAggregator(
+				testAllocator, testMemAcc, sources[0], tc.typs, tc.spec,
+				&evalCtx, constructors, constArguments, outputTypes,
+			)
+		})
 	}
 }
 

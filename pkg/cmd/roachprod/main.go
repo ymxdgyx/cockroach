@@ -80,7 +80,10 @@ var (
 	listMine          bool
 	clusterType       = "cockroach"
 	secure            = false
-	nodeEnv           = "COCKROACH_ENABLE_RPC_COMPRESSION=false"
+	nodeEnv           = []string{
+		"COCKROACH_ENABLE_RPC_COMPRESSION=false",
+		"COCKROACH_UI_RELEASE_NOTES_SIGNUP_DISMISSED=true",
+	}
 	nodeArgs          []string
 	tag               string
 	external          = false
@@ -89,10 +92,12 @@ var (
 	adminurlIPs       = false
 	useTreeDist       = true
 	encrypt           = false
+	skipInit          = false
 	quiet             = false
 	sig               = 9
 	waitFlag          = false
 	stageOS           string
+	stageDir          string
 	logsDir           string
 	logsFilter        string
 	logsProgramFilter string
@@ -174,7 +179,7 @@ Available clusters:
 	}
 	c.Nodes = nodes
 	c.Secure = secure
-	c.Env = nodeEnv
+	c.Env = strings.Join(nodeEnv, " ")
 	c.Args = nodeArgs
 	if tag != "" {
 		c.Tag = "/" + tag
@@ -984,7 +989,9 @@ environment variables to the cockroach process.
 ` + tagHelp + `
 The "start" command takes care of setting up the --join address and specifying
 reasonable defaults for other flags. One side-effect of this convenience is
-that node 1 is special and must be started for the cluster to be initialized.
+that node 1 is special and if started, is used to auto-initialize the cluster.
+The --skip-init flag can be used to avoid auto-initialization (which can then
+separately be done using the "init" command).
 
 If the COCKROACH_DEV_LICENSE environment variable is set the enterprise.license
 cluster setting will be set to its value.
@@ -1031,6 +1038,31 @@ other signals.
 			wait = true
 		}
 		c.Stop(sig, wait)
+		return nil
+	}),
+}
+
+var initCmd = &cobra.Command{
+	Use:   "init <cluster>",
+	Short: "initialize the cluster",
+	Long: `Initialize the cluster.
+
+The "init" command bootstraps the cluster (using "cockroach init"). It also sets
+default cluster settings. It's intended to be used in conjunction with
+'roachprod start --skip-init'.
+`,
+	Args: cobra.ExactArgs(1),
+	Run: wrap(func(cmd *cobra.Command, args []string) error {
+		clusterName, err := verifyClusterName(args[0])
+		if err != nil {
+			return err
+		}
+
+		c, err := newCluster(clusterName)
+		if err != nil {
+			return err
+		}
+		c.Init()
 		return nil
 	}),
 }
@@ -1181,7 +1213,7 @@ the 'zfs rollback' command:
 			}
 			fsCmd = `sudo zpool create -f data1 -m /mnt/data1 /dev/sdb`
 		case "ext4":
-			fsCmd = `sudo mkfs.ext4 -F /dev/sdb && sudo mount -o discard,defaults /dev/sdb /mnt/data1`
+			fsCmd = `sudo mkfs.ext4 -F /dev/sdb && sudo mount -o defaults /dev/sdb /mnt/data1`
 		default:
 			return fmt.Errorf("unknown filesystem %q", fs)
 		}
@@ -1296,6 +1328,11 @@ Some examples of usage:
 			return errors.Errorf("cannot stage binary on %s", os)
 		}
 
+		dir := "."
+		if stageDir != "" {
+			dir = stageDir
+		}
+
 		applicationName := args[1]
 		versionArg := ""
 		if len(args) == 3 {
@@ -1304,7 +1341,7 @@ Some examples of usage:
 		switch applicationName {
 		case "cockroach":
 			sha, err := install.StageRemoteBinary(
-				c, applicationName, "cockroach/cockroach", versionArg, debugArch,
+				c, applicationName, "cockroach/cockroach", versionArg, debugArch, dir,
 			)
 			if err != nil {
 				return err
@@ -1319,6 +1356,7 @@ Some examples of usage:
 					sha,
 					debugArch,
 					libExt,
+					dir,
 				); err != nil {
 					return err
 				}
@@ -1326,11 +1364,11 @@ Some examples of usage:
 			return nil
 		case "workload":
 			_, err := install.StageRemoteBinary(
-				c, applicationName, "cockroach/workload", versionArg, "", /* arch */
+				c, applicationName, "cockroach/workload", versionArg, "" /* arch */, dir,
 			)
 			return err
 		case "release":
-			return install.StageCockroachRelease(c, versionArg, releaseArch)
+			return install.StageCockroachRelease(c, versionArg, releaseArch, dir)
 		default:
 			return fmt.Errorf("unknown application %s", applicationName)
 		}
@@ -1558,6 +1596,7 @@ func main() {
 		monitorCmd,
 		startCmd,
 		stopCmd,
+		initCmd,
 		runCmd,
 		wipeCmd,
 		reformatCmd,
@@ -1707,6 +1746,7 @@ func main() {
 	putCmd.Flags().BoolVar(&useTreeDist, "treedist", useTreeDist, "use treedist copy algorithm")
 
 	stageCmd.Flags().StringVar(&stageOS, "os", "", "operating system override for staged binaries")
+	stageCmd.Flags().StringVar(&stageDir, "dir", "", "destination for staged binaries")
 
 	logsCmd.Flags().StringVar(
 		&logsFilter, "filter", "", "re to filter log messages")
@@ -1748,12 +1788,14 @@ func main() {
 				"start nodes sequentially so node IDs match hostnames")
 			cmd.Flags().StringArrayVarP(
 				&nodeArgs, "args", "a", nil, "node arguments")
-			cmd.Flags().StringVarP(
+			cmd.Flags().StringArrayVarP(
 				&nodeEnv, "env", "e", nodeEnv, "node environment variables")
 			cmd.Flags().StringVarP(
 				&clusterType, "type", "t", clusterType, `cluster type ("cockroach" or "cassandra")`)
 			cmd.Flags().BoolVar(
 				&install.StartOpts.Encrypt, "encrypt", encrypt, "start nodes with encryption at rest turned on")
+			cmd.Flags().BoolVar(
+				&install.StartOpts.SkipInit, "skip-init", skipInit, "skip initializing the cluster")
 			fallthrough
 		case sqlCmd:
 			cmd.Flags().StringVarP(

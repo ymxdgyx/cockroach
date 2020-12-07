@@ -25,18 +25,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/gogo/protobuf/types"
-	"github.com/opentracing/opentracing-go"
 )
 
 func TestTableReader(t *testing.T) {
@@ -64,14 +64,14 @@ func TestTableReader(t *testing.T) {
 
 	sqlutils.CreateTable(t, sqlDB, "t",
 		"a INT, b INT, sum INT, s STRING, PRIMARY KEY (a,b), INDEX bs (b,s)",
-		99,
+		19,
 		sqlutils.ToRowFn(aFn, bFn, sumFn, sqlutils.RowEnglishFn))
 
 	td := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
 
 	makeIndexSpan := func(start, end int) execinfrapb.TableReaderSpan {
 		var span roachpb.Span
-		prefix := roachpb.Key(sqlbase.MakeIndexKeyPrefix(keys.SystemSQLCodec, td, td.Indexes[0].ID))
+		prefix := roachpb.Key(rowenc.MakeIndexKeyPrefix(keys.SystemSQLCodec, td, td.Indexes[0].ID))
 		span.Key = append(prefix, encoding.EncodeVarintAscending(nil, int64(start))...)
 		span.EndKey = append(span.EndKey, prefix...)
 		span.EndKey = append(span.EndKey, encoding.EncodeVarintAscending(nil, int64(end))...)
@@ -88,23 +88,21 @@ func TestTableReader(t *testing.T) {
 				Spans: []execinfrapb.TableReaderSpan{{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)}},
 			},
 			post: execinfrapb.PostProcessSpec{
-				Filter:        execinfrapb.Expression{Expr: "@3 < 5 AND @2 != 3"}, // sum < 5 && b != 3
 				Projection:    true,
 				OutputColumns: []uint32{0, 1},
 			},
-			expected: "[[0 1] [0 2] [0 4] [1 0] [1 1] [1 2] [2 0] [2 1] [2 2] [3 0] [3 1] [4 0]]",
+			expected: "[[0 1] [0 2] [0 3] [0 4] [0 5] [0 6] [0 7] [0 8] [0 9] [1 0] [1 1] [1 2] [1 3] [1 4] [1 5] [1 6] [1 7] [1 8] [1 9]]",
 		},
 		{
 			spec: execinfrapb.TableReaderSpec{
 				Spans: []execinfrapb.TableReaderSpan{{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)}},
 			},
 			post: execinfrapb.PostProcessSpec{
-				Filter:        execinfrapb.Expression{Expr: "@3 < 5 AND @2 != 3"},
 				Projection:    true,
 				OutputColumns: []uint32{3}, // s
 				Limit:         4,
 			},
-			expected: "[['one'] ['two'] ['four'] ['one-zero']]",
+			expected: "[['one'] ['two'] ['three'] ['four']]",
 		},
 		{
 			spec: execinfrapb.TableReaderSpec{
@@ -114,11 +112,10 @@ func TestTableReader(t *testing.T) {
 				LimitHint: 1,
 			},
 			post: execinfrapb.PostProcessSpec{
-				Filter:        execinfrapb.Expression{Expr: "@1 < 3"}, // sum < 8
 				Projection:    true,
 				OutputColumns: []uint32{0, 1},
 			},
-			expected: "[[2 5] [1 5] [0 5] [2 4] [1 4] [0 4]]",
+			expected: "[[1 5] [0 5] [1 4] [0 4]]",
 		},
 	}
 
@@ -164,7 +161,7 @@ func TestTableReader(t *testing.T) {
 					results = buf
 				}
 
-				var res sqlbase.EncDatumRows
+				var res rowenc.EncDatumRows
 				for {
 					row, meta := results.Next()
 					if meta != nil && meta.LeafTxnFinalState == nil && meta.Metrics == nil {
@@ -188,7 +185,7 @@ func TestMisplannedRangesMetadata(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ctx := context.Background()
 
-	tc := serverutils.StartTestCluster(t, 3, /* numNodes */
+	tc := serverutils.StartNewTestCluster(t, 3, /* numNodes */
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
 			ServerArgs: base.TestServerArgs{
@@ -261,7 +258,7 @@ ALTER TABLE t EXPERIMENTAL_RELOCATE VALUES (ARRAY[2], 1), (ARRAY[1], 2), (ARRAY[
 			results = buf
 		}
 
-		var res sqlbase.EncDatumRows
+		var res rowenc.EncDatumRows
 		var metas []*execinfrapb.ProducerMetadata
 		for {
 			row, meta := results.Next()
@@ -299,6 +296,53 @@ ALTER TABLE t EXPERIMENTAL_RELOCATE VALUES (ARRAY[2], 1), (ARRAY[1], 2), (ARRAY[
 			misplannedRanges[1].Lease.Replica.NodeID != 3 {
 			t.Fatalf("expected misplanned ranges from nodes 2 and 3, got: %+v", metas[0])
 		}
+	})
+}
+
+func TestTableReaderDrain(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	s, sqlDB, kvDB := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(context.Background())
+
+	sqlutils.CreateTable(t, sqlDB, "t",
+		"num INT PRIMARY KEY",
+		3, /* numRows */
+		sqlutils.ToRowFn(sqlutils.RowIdxFn))
+
+	td := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
+
+	// Run the flow in a snowball trace so that we can test for tracing info.
+	tracer := tracing.NewTracer()
+	ctx, sp := tracing.StartSnowballTrace(context.Background(), tracer, "test flow ctx")
+	defer sp.Finish()
+	st := s.ClusterSettings()
+	evalCtx := tree.MakeTestingEvalContext(st)
+	defer evalCtx.Stop(ctx)
+
+	rootTxn := kv.NewTxn(ctx, s.DB(), s.NodeID())
+	leafInputState := rootTxn.GetLeafTxnInputState(ctx)
+	leafTxn := kv.NewLeafTxn(ctx, s.DB(), s.NodeID(), &leafInputState)
+	flowCtx := execinfra.FlowCtx{
+		EvalCtx: &evalCtx,
+		Cfg: &execinfra.ServerConfig{
+			Settings: st,
+		},
+		Txn:    leafTxn,
+		Local:  true,
+		NodeID: evalCtx.NodeID,
+	}
+	spec := execinfrapb.TableReaderSpec{
+		Spans: []execinfrapb.TableReaderSpan{{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)}},
+		Table: *td.TableDesc(),
+	}
+	post := execinfrapb.PostProcessSpec{
+		Projection:    true,
+		OutputColumns: []uint32{0},
+	}
+
+	testReaderProcessorDrain(ctx, t, func(out execinfra.RowReceiver) (execinfra.Processor, error) {
+		return newTableReader(&flowCtx, 0 /* processorID */, &spec, &post, out)
 	})
 }
 
@@ -345,9 +389,9 @@ func TestLimitScans(t *testing.T) {
 
 	// Now we're going to run the tableReader and trace it.
 	tracer := tracing.NewTracer()
-	sp := tracer.StartSpan("root", tracing.Recordable)
-	tracing.StartRecording(sp, tracing.SnowballRecording)
-	ctx = opentracing.ContextWithSpan(ctx, sp)
+	sp := tracer.StartSpan("root", tracing.WithForceRealSpan())
+	sp.StartRecording(tracing.SnowballRecording)
+	ctx = tracing.ContextWithSpan(ctx, sp)
 	flowCtx.EvalCtx.Context = ctx
 
 	tr, err := newTableReader(&flowCtx, 0 /* processorID */, &spec, &post, nil /* output */)
@@ -365,7 +409,7 @@ func TestLimitScans(t *testing.T) {
 
 		// Simulate what the DistSQLReceiver does and ingest the trace.
 		if meta != nil && len(meta.TraceData) > 0 {
-			if err := tracing.ImportRemoteSpans(sp, meta.TraceData); err != nil {
+			if err := sp.ImportRemoteSpans(meta.TraceData); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -378,22 +422,25 @@ func TestLimitScans(t *testing.T) {
 		t.Fatalf("expected %d rows, got: %d", limit, rows)
 	}
 
+	skip.UnderMetamorphic(t, "the rest of this test isn't metamorphic: its output "+
+		"depends on the batch size, which varies the number of spans searched.")
+
 	// We're now going to count how many distinct scans we've done. This regex is
 	// specific so that we don't count range resolving requests, and we dedupe
 	// scans from the same key as the DistSender retries scans when it detects
 	// splits.
 	re := regexp.MustCompile(fmt.Sprintf(`querying next range at /Table/%d/1(\S.*)?`, tableDesc.ID))
-	spans := tracing.GetRecording(sp)
+	spans := sp.GetRecording()
 	ranges := make(map[string]struct{})
 	for _, span := range spans {
 		if span.Operation == tableReaderProcName {
 			// Verify that stat collection lines up with results.
-			trs := TableReaderStats{}
-			if err := types.UnmarshalAny(span.Stats, &trs); err != nil {
+			stats := execinfrapb.ComponentStats{}
+			if err := types.UnmarshalAny(span.Stats, &stats); err != nil {
 				t.Fatal(err)
 			}
-			if trs.InputStats.NumRows != limit {
-				t.Fatalf("read %d rows, but stats only counted: %d", limit, trs.InputStats.NumRows)
+			if stats.KV.TuplesRead.Value() != limit {
+				t.Fatalf("read %d rows, but stats counted: %s", limit, stats.KV.TuplesRead)
 			}
 		}
 		for _, l := range span.Logs {

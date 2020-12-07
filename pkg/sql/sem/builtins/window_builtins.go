@@ -248,7 +248,7 @@ var _ tree.WindowFunc = &firstValueWindow{}
 var _ tree.WindowFunc = &lastValueWindow{}
 var _ tree.WindowFunc = &nthValueWindow{}
 
-// aggregateWindowFunc aggregates over the the current row's window frame, using
+// aggregateWindowFunc aggregates over the current row's window frame, using
 // the internal tree.AggregateFunc to perform the aggregation.
 type aggregateWindowFunc struct {
 	agg     tree.AggregateFunc
@@ -342,9 +342,16 @@ type framableAggregateWindowFunc struct {
 func newFramableAggregateWindow(
 	agg tree.AggregateFunc, aggConstructor func(*tree.EvalContext, tree.Datums) tree.AggregateFunc,
 ) tree.WindowFunc {
+	// jsonObjectAggregate is a special aggregate function because its
+	// implementation assumes that once Result is called, the returned
+	// object is immutable and calls to Add will result in a panic. To go
+	// around this limitation, we make sure that the function is reset for
+	// each row regardless of the window frame.
+	_, shouldReset := agg.(*jsonObjectAggregate)
 	return &framableAggregateWindowFunc{
 		agg:            &aggregateWindowFunc{agg: agg, peerRes: tree.DNull},
 		aggConstructor: aggConstructor,
+		shouldReset:    shouldReset,
 	}
 }
 

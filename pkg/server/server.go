@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,7 +40,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/container"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptprovider"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptreconcile"
@@ -47,6 +49,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/debug"
 	"github.com/cockroachdb/cockroach/pkg/server/goroutinedumper"
 	"github.com/cockroachdb/cockroach/pkg/server/heapprofiler"
@@ -57,8 +60,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/gcjob" // register jobs declared outside of pkg/sql
+	"github.com/cockroachdb/cockroach/pkg/sql/optionalnodeliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
@@ -75,17 +78,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 	"github.com/cockroachdb/sentry-go"
 	gwruntime "github.com/grpc-ecosystem/grpc-gateway/runtime"
-	"github.com/opentracing/opentracing-go"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	grpcstatus "google.golang.org/grpc/status"
 )
 
 var (
@@ -110,28 +114,6 @@ var (
 	)
 )
 
-// TODO(peter): Until go1.11, ServeMux.ServeHTTP was not safe to call
-// concurrently with ServeMux.Handle. So we provide our own wrapper with proper
-// locking. Slightly less efficient because it locks unnecessarily, but
-// safe. See TestServeMuxConcurrency. Should remove once we've upgraded to
-// go1.11.
-type safeServeMux struct {
-	mu  syncutil.RWMutex
-	mux http.ServeMux
-}
-
-func (mux *safeServeMux) Handle(pattern string, handler http.Handler) {
-	mux.mu.Lock()
-	mux.mux.Handle(pattern, handler)
-	mux.mu.Unlock()
-}
-
-func (mux *safeServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	mux.mu.RLock()
-	mux.mux.ServeHTTP(w, r)
-	mux.mu.RUnlock()
-}
-
 // Server is the cockroach server node.
 type Server struct {
 	// The following fields are populated in NewServer.
@@ -139,16 +121,15 @@ type Server struct {
 	nodeIDContainer *base.NodeIDContainer
 	cfg             Config
 	st              *cluster.Settings
-	mux             safeServeMux
+	mux             http.ServeMux
 	clock           *hlc.Clock
 	rpcContext      *rpc.Context
+	engines         Engines
 	// The gRPC server on which the different RPC handlers will be registered.
-	grpc *grpcServer
-	// The optional tenant gRPC used by SQL tenants.
-	tenantGRPC   *grpcServer
+	grpc         *grpcServer
 	gossip       *gossip.Gossip
 	nodeDialer   *nodedialer.Dialer
-	nodeLiveness *kvserver.NodeLiveness
+	nodeLiveness *liveness.NodeLiveness
 	storePool    *kvserver.StorePool
 	tcsFactory   *kvcoord.TxnCoordSenderFactory
 	distSender   *kvcoord.DistSender
@@ -158,13 +139,15 @@ type Server struct {
 	recorder     *status.MetricsRecorder
 	runtime      *status.RuntimeStatSampler
 
-	admin          *adminServer
-	status         *statusServer
-	authentication *authenticationServer
-	tsDB           *ts.DB
-	tsServer       *ts.Server
-	raftTransport  *kvserver.RaftTransport
-	stopper        *stop.Stopper
+	admin           *adminServer
+	status          *statusServer
+	authentication  *authenticationServer
+	migrationServer *migrationServer
+	oidc            OIDC
+	tsDB            *ts.DB
+	tsServer        *ts.Server
+	raftTransport   *kvserver.RaftTransport
+	stopper         *stop.Stopper
 
 	debug *debug.Server
 
@@ -178,9 +161,7 @@ type Server struct {
 	externalStorageBuilder *externalStorageBuilder
 
 	// The following fields are populated at start time, i.e. in `(*Server).Start`.
-
 	startTime time.Time
-	engines   Engines
 }
 
 // externalStorageBuilder is a wrapper around the ExternalStorage factory
@@ -223,7 +204,7 @@ func (e *externalStorageBuilder) makeExternalStorage(
 }
 
 func (e *externalStorageBuilder) makeExternalStorageFromURI(
-	ctx context.Context, uri string, user string,
+	ctx context.Context, uri string, user security.SQLUsername,
 ) (cloud.ExternalStorage, error) {
 	if !e.initCalled {
 		return nil, errors.New("cannot create external storage before init")
@@ -255,9 +236,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 	registry := metric.NewRegistry()
 	// If the tracer has a Close function, call it after the server stops.
-	if tr, ok := cfg.AmbientCtx.Tracer.(stop.Closer); ok {
-		stopper.AddCloser(tr)
-	}
+	stopper.AddCloser(cfg.AmbientCtx.Tracer)
 
 	// Add a dynamic log tag value for the node ID.
 	//
@@ -274,9 +253,34 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	nodeIDContainer := &base.NodeIDContainer{}
 	cfg.AmbientCtx.AddLogTag("n", nodeIDContainer)
 	const sqlInstanceID = base.SQLInstanceID(0)
-	idContainer := base.NewSQLIDContainer(sqlInstanceID, nodeIDContainer, true /* exposed */)
+	idContainer := base.NewSQLIDContainer(sqlInstanceID, nodeIDContainer)
 
 	ctx := cfg.AmbientCtx.AnnotateCtx(context.Background())
+
+	engines, err := cfg.CreateEngines(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create engines")
+	}
+	stopper.AddCloser(&engines)
+
+	nodeTombStorage := &nodeTombstoneStorage{engs: engines}
+	checkPingFor := func(ctx context.Context, nodeID roachpb.NodeID) error {
+		ts, err := nodeTombStorage.IsDecommissioned(ctx, nodeID)
+		if err != nil {
+			// An error here means something very basic is not working. Better to terminate
+			// than to limp along.
+			log.Fatalf(ctx, "unable to read decommissioned status for n%d: %v", nodeID, err)
+		}
+		if !ts.IsZero() {
+			// The node was decommissioned.
+			return grpcstatus.Errorf(codes.PermissionDenied,
+				"n%d was permanently removed from the cluster at %s; it is not allowed to rejoin the cluster",
+				nodeID, ts,
+			)
+		}
+		// The common case - target node is not decommissioned.
+		return nil
+	}
 
 	rpcCtxOpts := rpc.ContextOptions{
 		TenantID:   roachpb.SystemTenantID,
@@ -285,7 +289,12 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		Clock:      clock,
 		Stopper:    stopper,
 		Settings:   cfg.Settings,
-	}
+		OnOutgoingPing: func(req *rpc.PingRequest) error {
+			return checkPingFor(ctx, req.TargetNodeID)
+		},
+		OnIncomingPing: func(req *rpc.PingRequest) error {
+			return checkPingFor(ctx, req.OriginNodeID)
+		}}
 	if knobs := cfg.TestingKnobs.Server; knobs != nil {
 		serverKnobs := knobs.(*TestingKnobs)
 		rpcCtxOpts.Knobs = serverKnobs.ContextTestingKnobs
@@ -327,19 +336,14 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	// and after ValidateAddrs().
 	rpcContext.CheckCertificateAddrs(ctx)
 
-	grpc := newGRPCServer(rpcContext)
-
-	var tenantGRPC *grpcServer
-	if cfg.SplitListenTenant {
-		tenantGRPC = newGRPCServer(rpcContext, rpc.ForTenant)
-	}
+	grpcServer := newGRPCServer(rpcContext)
 
 	g := gossip.New(
 		cfg.AmbientCtx,
 		&rpcContext.ClusterID,
 		nodeIDContainer,
 		rpcContext,
-		grpc.Server,
+		grpcServer.Server,
 		stopper,
 		registry,
 		cfg.Locality,
@@ -403,17 +407,36 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	db := kv.NewDBWithContext(cfg.AmbientCtx, tcsFactory, clock, dbCtx)
 
 	nlActive, nlRenewal := cfg.NodeLivenessDurations()
+	if knobs := cfg.TestingKnobs.NodeLiveness; knobs != nil {
+		nlKnobs := knobs.(kvserver.NodeLivenessTestingKnobs)
+		if duration := nlKnobs.LivenessDuration; duration != 0 {
+			nlActive = duration
+		}
+		if duration := nlKnobs.RenewalDuration; duration != 0 {
+			nlRenewal = duration
+		}
+	}
 
-	nodeLiveness := kvserver.NewNodeLiveness(
-		cfg.AmbientCtx,
-		clock,
-		db,
-		g,
-		nlActive,
-		nlRenewal,
-		st,
-		cfg.HistogramWindowInterval(),
-	)
+	nodeLiveness := liveness.NewNodeLiveness(liveness.NodeLivenessOptions{
+		AmbientCtx:              cfg.AmbientCtx,
+		Clock:                   clock,
+		DB:                      db,
+		Gossip:                  g,
+		LivenessThreshold:       nlActive,
+		RenewalDuration:         nlRenewal,
+		Settings:                st,
+		HistogramWindowInterval: cfg.HistogramWindowInterval(),
+		OnNodeDecommissioned: func(liveness livenesspb.Liveness) {
+			if knobs, ok := cfg.TestingKnobs.Server.(*TestingKnobs); ok && knobs.OnDecommissionedCallback != nil {
+				knobs.OnDecommissionedCallback(liveness)
+			}
+			if err := nodeTombStorage.SetDecommissioned(
+				ctx, liveness.NodeID, timeutil.Unix(0, liveness.Expiration.WallTime).UTC(),
+			); err != nil {
+				log.Fatalf(ctx, "unable to add tombstone for n%d: %s", liveness.NodeID, err)
+			}
+		},
+	})
 	registry.AddMetricStruct(nodeLiveness.Metrics())
 
 	storePool := kvserver.NewStorePool(
@@ -427,7 +450,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	)
 
 	raftTransport := kvserver.NewRaftTransport(
-		cfg.AmbientCtx, st, nodeDialer, grpc.Server, stopper,
+		cfg.AmbientCtx, st, nodeDialer, grpcServer.Server, stopper,
 	)
 
 	tsDB := ts.NewDB(db, cfg.Settings)
@@ -453,7 +476,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		return externalStorageBuilder.makeExternalStorage(ctx, dest)
 	}
 	externalStorageFromURI := func(ctx context.Context, uri string,
-		user string) (cloud.ExternalStorage, error) {
+		user security.SQLUsername) (cloud.ExternalStorage, error) {
 		return externalStorageBuilder.makeExternalStorageFromURI(ctx, uri, user)
 	}
 
@@ -513,7 +536,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 			Dialer: nodeDialer.CTDialer(),
 		}),
 
-		EnableEpochRangeLeases:  true,
 		ExternalStorage:         externalStorage,
 		ExternalStorageFromURI:  externalStorageFromURI,
 		ProtectedTimestampCache: protectedtsProvider,
@@ -529,12 +551,9 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		storeCfg, recorder, registry, stopper,
 		txnMetrics, nil /* execCfg */, &rpcContext.ClusterID)
 	lateBoundNode = node
-	roachpb.RegisterInternalServer(grpc.Server, node)
-	if tenantGRPC != nil {
-		roachpb.RegisterInternalServer(tenantGRPC.Server, node)
-	}
-	kvserver.RegisterPerReplicaServer(grpc.Server, node.perReplicaServer)
-	node.storeCfg.ClosedTimestamp.RegisterClosedTimestampServer(grpc.Server)
+	roachpb.RegisterInternalServer(grpcServer.Server, node)
+	kvserver.RegisterPerReplicaServer(grpcServer.Server, node.perReplicaServer)
+	node.storeCfg.ClosedTimestamp.RegisterClosedTimestampServer(grpcServer.Server)
 	replicationReporter := reports.NewReporter(
 		db, node.stores, storePool, st, nodeLiveness, internalExecutor)
 
@@ -552,7 +571,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 
 	lateBoundServer := &Server{}
 	// TODO(tbg): give adminServer only what it needs (and avoid circular deps).
-	sAdmin := newAdminServer(lateBoundServer)
+	sAdmin := newAdminServer(lateBoundServer, internalExecutor)
 	sessionRegistry := sql.NewSessionRegistry()
 
 	sStatus := newStatusServer(
@@ -577,7 +596,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		if reflect.ValueOf(gw).IsNil() {
 			return nil, errors.Errorf("%d: nil", i)
 		}
-		gw.RegisterService(grpc.Server)
+		gw.RegisterService(grpcServer.Server)
 	}
 
 	var jobAdoptionStopFile string
@@ -590,11 +609,10 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 
 	sqlServer, err := newSQLServer(ctx, sqlServerArgs{
 		sqlServerOptionalKVArgs: sqlServerOptionalKVArgs{
-			statusServer:           serverpb.MakeOptionalStatusServer(sStatus),
-			nodeLiveness:           sqlbase.MakeOptionalNodeLiveness(nodeLiveness),
+			nodesStatusServer:      serverpb.MakeOptionalNodesStatusServer(sStatus),
+			nodeLiveness:           optionalnodeliveness.MakeContainer(nodeLiveness),
 			gossip:                 gossip.MakeOptionalGossip(g),
-			grpcServer:             grpc.Server,
-			recorder:               recorder,
+			grpcServer:             grpcServer.Server,
 			nodeIDContainer:        idContainer,
 			externalStorage:        externalStorage,
 			externalStorageFromURI: externalStorageFromURI,
@@ -612,11 +630,13 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		distSender:               distSender,
 		db:                       db,
 		registry:                 registry,
+		recorder:                 recorder,
 		sessionRegistry:          sessionRegistry,
 		circularInternalExecutor: internalExecutor,
 		circularJobRegistry:      jobRegistry,
 		jobAdoptionStopFile:      jobAdoptionStopFile,
 		protectedtsProvider:      protectedtsProvider,
+		sqlStatusServer:          sStatus,
 	})
 	if err != nil {
 		return nil, err
@@ -631,8 +651,8 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		st:                     st,
 		clock:                  clock,
 		rpcContext:             rpcContext,
-		grpc:                   grpc,
-		tenantGRPC:             tenantGRPC,
+		engines:                engines,
+		grpc:                   grpcServer,
 		gossip:                 g,
 		nodeDialer:             nodeDialer,
 		nodeLiveness:           nodeLiveness,
@@ -674,7 +694,7 @@ func (s *Server) AnnotateCtx(ctx context.Context) context.Context {
 // AnnotateCtxWithSpan is a convenience wrapper; see AmbientContext.
 func (s *Server) AnnotateCtxWithSpan(
 	ctx context.Context, opName string,
-) (context.Context, opentracing.Span) {
+) (context.Context, *tracing.Span) {
 	return s.cfg.AmbientCtx.AnnotateCtxWithSpan(ctx, opName)
 }
 
@@ -688,10 +708,11 @@ func (s *Server) NodeID() roachpb.NodeID {
 	return s.node.Descriptor.NodeID
 }
 
-// InitialBoot returns whether this is the first time the node has booted.
-// Only intended to help print debugging info during server startup.
-func (s *Server) InitialBoot() bool {
-	return s.node.initialBoot
+// InitialStart returns whether this is the first time the node has started (as
+// opposed to being restarted). Only intended to help print debugging info
+// during server startup.
+func (s *Server) InitialStart() bool {
+	return s.node.initialStart
 }
 
 // grpcGatewayServer represents a grpc service with HTTP endpoints through GRPC
@@ -719,50 +740,69 @@ func (l *ListenError) Error() string { return l.cause.Error() }
 // Unwrap is because ListenError is a wrapper.
 func (l *ListenError) Unwrap() error { return l.cause }
 
-// inspectEngines goes through engines and populates in initDiskState. It also
-// calls SynthesizeClusterVersionFromEngines, which selects and backfills the
-// cluster version to all initialized engines.
-//
-// The initDiskState returned by this method will reflect a zero NodeID if none
-// has been assigned yet (i.e. if none of the engines is initialized).
+// inspectEngines goes through engines and constructs an initState. The
+// initState returned by this method will reflect a zero NodeID if none has
+// been assigned yet (i.e. if none of the engines is initialized). See
+// commentary on initState for the intended usage of inspectEngines.
 func inspectEngines(
 	ctx context.Context,
 	engines []storage.Engine,
 	binaryVersion, binaryMinSupportedVersion roachpb.Version,
-) (*initDiskState, error) {
-	state := &initDiskState{}
+) (*initState, error) {
+	var clusterID uuid.UUID
+	var nodeID roachpb.NodeID
+	var initializedEngines, uninitializedEngines []storage.Engine
+	var initialSettingsKVs []roachpb.KeyValue
 
 	for _, eng := range engines {
+		// Once cached settings are loaded from any engine we can stop.
+		if len(initialSettingsKVs) == 0 {
+			var err error
+			initialSettingsKVs, err = loadCachedSettingsKVs(ctx, eng)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		storeIdent, err := kvserver.ReadStoreIdent(ctx, eng)
 		if errors.HasType(err, (*kvserver.NotBootstrappedError)(nil)) {
-			state.newEngines = append(state.newEngines, eng)
+			uninitializedEngines = append(uninitializedEngines, eng)
 			continue
 		} else if err != nil {
 			return nil, err
 		}
 
-		if state.clusterID != uuid.Nil && state.clusterID != storeIdent.ClusterID {
-			return nil, errors.Errorf("conflicting store ClusterIDs: %s, %s", storeIdent.ClusterID, state.clusterID)
+		if clusterID != uuid.Nil && clusterID != storeIdent.ClusterID {
+			return nil, errors.Errorf("conflicting store ClusterIDs: %s, %s", storeIdent.ClusterID, clusterID)
 		}
-		state.clusterID = storeIdent.ClusterID
+		clusterID = storeIdent.ClusterID
 
 		if storeIdent.StoreID == 0 || storeIdent.NodeID == 0 || storeIdent.ClusterID == uuid.Nil {
 			return nil, errors.Errorf("partially initialized store: %+v", storeIdent)
 		}
 
-		if state.nodeID != 0 && state.nodeID != storeIdent.NodeID {
-			return nil, errors.Errorf("conflicting store NodeIDs: %s, %s", storeIdent.NodeID, state.nodeID)
+		if nodeID != 0 && nodeID != storeIdent.NodeID {
+			return nil, errors.Errorf("conflicting store NodeIDs: %s, %s", storeIdent.NodeID, nodeID)
 		}
-		state.nodeID = storeIdent.NodeID
+		nodeID = storeIdent.NodeID
 
-		state.initializedEngines = append(state.initializedEngines, eng)
+		initializedEngines = append(initializedEngines, eng)
 	}
-
-	cv, err := kvserver.SynthesizeClusterVersionFromEngines(ctx, state.initializedEngines, binaryVersion, binaryMinSupportedVersion)
+	clusterVersion, err := kvserver.SynthesizeClusterVersionFromEngines(
+		ctx, initializedEngines, binaryVersion, binaryMinSupportedVersion,
+	)
 	if err != nil {
 		return nil, err
 	}
-	state.clusterVersion = cv
+
+	state := &initState{
+		clusterID:            clusterID,
+		nodeID:               nodeID,
+		initializedEngines:   initializedEngines,
+		uninitializedEngines: uninitializedEngines,
+		clusterVersion:       clusterVersion,
+		initialSettingsKVs:   initialSettingsKVs,
+	}
 	return state, nil
 }
 
@@ -771,25 +811,21 @@ func inspectEngines(
 // file", these are written once the listeners are available, before the server
 // is necessarily ready to serve.
 type listenerInfo struct {
-	listenRPC       string // the (RPC) listen address, rewritten after name resolution and port allocation
-	advertiseRPC    string // contains the original addr part of --listen/--advertise, with actual port number after port allocation if original was 0
-	listenSQL       string // the SQL endpoint, rewritten after name resolution and port allocation
-	advertiseSQL    string // contains the original addr part of --sql-addr, with actual port number after port allocation if original was 0
-	listenTenant    string // the tenant KV endpoint, rewritten after name resolution and port allocation
-	advertiseTenant string // contains the original addr part of --tenant-addr, with actual port number after port allocation if original was 0
-	listenHTTP      string // the HTTP endpoint
+	listenRPC    string // the (RPC) listen address, rewritten after name resolution and port allocation
+	advertiseRPC string // contains the original addr part of --listen/--advertise, with actual port number after port allocation if original was 0
+	listenSQL    string // the SQL endpoint, rewritten after name resolution and port allocation
+	advertiseSQL string // contains the original addr part of --sql-addr, with actual port number after port allocation if original was 0
+	listenHTTP   string // the HTTP endpoint
 }
 
 // Iter returns a mapping of file names to desired contents.
 func (li listenerInfo) Iter() map[string]string {
 	return map[string]string{
-		"cockroach.listen-addr":           li.listenRPC,
-		"cockroach.advertise-addr":        li.advertiseRPC,
-		"cockroach.sql-addr":              li.listenSQL,
-		"cockroach.advertise-sql-addr":    li.advertiseSQL,
-		"cockroach.tenant-addr":           li.listenTenant,
-		"cockroach.advertise-tenant-addr": li.advertiseTenant,
-		"cockroach.http-addr":             li.listenHTTP,
+		"cockroach.listen-addr":        li.listenRPC,
+		"cockroach.advertise-addr":     li.advertiseRPC,
+		"cockroach.sql-addr":           li.listenSQL,
+		"cockroach.advertise-sql-addr": li.advertiseSQL,
+		"cockroach.http-addr":          li.listenHTTP,
 	}
 }
 
@@ -999,15 +1035,39 @@ func (s *Server) startPersistingHLCUpperBound(
 	return nil
 }
 
-// Start starts the server on the specified port, starts gossip and initializes
-// the node using the engines from the server's context. This is complex since
-// it sets up the listeners and the associated port muxing, but especially since
-// it has to solve the "bootstrapping problem": nodes need to connect to Gossip
-// fairly early, but what drives Gossip connectivity are the first range
-// replicas in the kv store. This in turn suggests opening the Gossip server
-// early. However, naively doing so also serves most other services prematurely,
-// which exposes a large surface of potentially underinitialized services. This
-// is avoided with some additional complexity that can be summarized as follows:
+// getServerEndpointCounter returns a telemetry Counter corresponding to the
+// given grpc method.
+func getServerEndpointCounter(method string) telemetry.Counter {
+	const counterPrefix = "http.grpc-gateway"
+	return telemetry.GetCounter(fmt.Sprintf("%s.%s", counterPrefix, method))
+}
+
+// Start calls PreStart() and AcceptClient() in sequence.
+// This is suitable for use e.g. in tests.
+func (s *Server) Start(ctx context.Context) error {
+	if err := s.PreStart(ctx); err != nil {
+		return err
+	}
+	return s.AcceptClients(ctx)
+}
+
+// PreStart starts the server on the specified port, starts gossip and
+// initializes the node using the engines from the server's context.
+//
+// It does not activate the pgwire listener over the network / unix
+// socket, which is done by the AcceptClients() method. The separation
+// between the two exists so that SQL initialization can take place
+// before the first client is accepted.
+//
+// PreStart is complex since it sets up the listeners and the associated
+// port muxing, but especially since it has to solve the
+// "bootstrapping problem": nodes need to connect to Gossip fairly
+// early, but what drives Gossip connectivity are the first range
+// replicas in the kv store. This in turn suggests opening the Gossip
+// server early. However, naively doing so also serves most other
+// services prematurely, which exposes a large surface of potentially
+// underinitialized services. This is avoided with some additional
+// complexity that can be summarized as follows:
 //
 // - before blocking trying to connect to the Gossip network, we already open
 //   the admin UI (so that its diagnostics are available)
@@ -1017,7 +1077,7 @@ func (s *Server) startPersistingHLCUpperBound(
 //
 // The passed context can be used to trace the server startup. The context
 // should represent the general startup operation.
-func (s *Server) Start(ctx context.Context) error {
+func (s *Server) PreStart(ctx context.Context) error {
 	ctx = s.AnnotateCtx(ctx)
 
 	// Start the time sanity checker.
@@ -1056,12 +1116,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
-	s.engines, err = s.cfg.CreateEngines(ctx)
-	if err != nil {
-		return errors.Wrap(err, "failed to create engines")
-	}
-	s.stopper.AddCloser(&s.engines)
-
 	// Initialize the external storage builders configuration params now that the
 	// engines have been created. The object can be used to create ExternalStorage
 	// objects hereafter.
@@ -1070,109 +1124,90 @@ func (s *Server) Start(ctx context.Context) error {
 		blobs.NewBlobClientFactory(s.nodeIDContainer.Get(),
 			s.nodeDialer, s.st.ExternalIODir), &fileTableInternalExecutor, s.db)
 
-	bootstrapVersion := s.cfg.Settings.Version.BinaryVersion()
-	if knobs := s.cfg.TestingKnobs.Server; knobs != nil {
-		if ov := knobs.(*TestingKnobs).BootstrapVersionOverride; ov != (roachpb.Version{}) {
-			bootstrapVersion = ov
-		}
-	}
+	// Filter out self from the gossip bootstrap resolvers.
+	filtered := s.cfg.FilterGossipBootstrapResolvers(ctx)
 
 	// Set up the init server. We have to do this relatively early because we
 	// can't call RegisterInitServer() after `grpc.Serve`, which is called in
 	// startRPCServer (and for the loopback grpc-gw connection).
-	initServer, err := setupInitServer(
-		ctx,
-		s.cfg.Settings.Version.BinaryVersion(),
-		s.cfg.Settings.Version.BinaryMinSupportedVersion(),
-		bootstrapVersion,
-		&s.cfg.DefaultZoneConfig,
-		&s.cfg.DefaultSystemZoneConfig,
-		s.engines,
-	)
-	if err != nil {
-		return err
+	var initServer *initServer
+	{
+		dialOpts, err := s.rpcContext.GRPCDialOptions()
+		if err != nil {
+			return err
+		}
+
+		initConfig := newInitServerConfig(s.cfg, dialOpts)
+		inspectedDiskState, err := inspectEngines(
+			ctx,
+			s.engines,
+			s.cfg.Settings.Version.BinaryVersion(),
+			s.cfg.Settings.Version.BinaryMinSupportedVersion(),
+		)
+		if err != nil {
+			return err
+		}
+
+		initServer = newInitServer(s.cfg.AmbientCtx, inspectedDiskState, initConfig)
 	}
 
+	initialDiskClusterVersion := initServer.DiskClusterVersion()
 	{
-		// Set up the callback that persists gossiped version bumps to the
-		// engines. The invariant we uphold here is that the bump needs to be
+		// The invariant we uphold here is that any version bump needs to be
 		// persisted on all engines before it becomes "visible" to the version
-		// setting. To this end,
+		// setting. To this end, we:
 		//
-		// a) make sure Gossip is not started yet, and
-		// b) set up the BeforeChange callback on the version setting to persist
-		//    incoming updates to all engines.
-		// c) write back the disk-loaded cluster version to all engines,
-		// d) initialize the version setting (with the disk-loaded version).
+		// a) write back the disk-loaded cluster version to all engines,
+		// b) initialize the version setting (using the disk-loaded version).
 		//
 		// Note that "all engines" means "all engines", not "all initialized
 		// engines". We cannot initialize engines this early in the boot
 		// sequence.
-		s.gossip.AssertNotStarted(ctx)
-
-		// Serialize the callback through a mutex to make sure we're not
-		// clobbering the disk state if callback gets fired off concurrently.
-		var mu syncutil.Mutex
-		cb := func(ctx context.Context, newCV clusterversion.ClusterVersion) {
-			mu.Lock()
-			defer mu.Unlock()
-			v := s.cfg.Settings.Version
-			prevCV, err := kvserver.SynthesizeClusterVersionFromEngines(
-				ctx, s.engines, v.BinaryVersion(), v.BinaryMinSupportedVersion(),
-			)
-			if err != nil {
-				log.Fatalf(ctx, "%v", err)
-			}
-			if !prevCV.Version.Less(newCV.Version) {
-				// If nothing needs to be updated, don't do anything. The
-				// callbacks fire async (or at least we want to assume the worst
-				// case in which they do) and so an old update might happen
-				// after a new one.
-				return
-			}
-			if err := kvserver.WriteClusterVersionToEngines(ctx, s.engines, newCV); err != nil {
-				log.Fatalf(ctx, "%v", err)
-			}
-			log.Infof(ctx, "active cluster version is now %s (up from %s)", newCV, prevCV)
-		}
-		clusterversion.SetBeforeChange(ctx, &s.cfg.Settings.SV, cb)
-
-		diskClusterVersion := initServer.DiskClusterVersion()
+		//
 		// The version setting loaded from disk is the maximum cluster version
 		// seen on any engine. If new stores are being added to the server right
 		// now, or if the process crashed earlier half-way through the callback,
 		// that version won't be on all engines. For that reason, we backfill
 		// once.
 		if err := kvserver.WriteClusterVersionToEngines(
-			ctx, s.engines, diskClusterVersion,
+			ctx, s.engines, initialDiskClusterVersion,
 		); err != nil {
 			return err
 		}
 
-		// NB: if we bootstrap a new server (in initServer.ServeAndWait below)
-		// we will call Initialize a second time, to eagerly move it to the
-		// bootstrap version (from the min supported version). Initialize()
-		// tolerates that. Note that in that case we know that the callback
-		// has not fired yet, since Gossip won't connect (to itself) until
-		// the server starts and so the callback will never fire prior to
-		// that second Initialize() call. Note also that at this point in
-		// the code we don't know if we'll bootstrap or join an existing
-		// cluster, so we have to conservatively go with the version from
-		// disk, which in the case of no initialized engines is the binary
-		// min supported version.
-		if err := clusterversion.Initialize(ctx, diskClusterVersion.Version, &s.cfg.Settings.SV); err != nil {
+		// Note that at this point in the code we don't know if we'll bootstrap
+		// or join an existing cluster, so we have to conservatively go with the
+		// version from disk. If there are no initialized engines, this is the
+		// binary min supported version.
+		if err := clusterversion.Initialize(ctx, initialDiskClusterVersion.Version, &s.cfg.Settings.SV); err != nil {
 			return err
 		}
 
 		// At this point, we've established the invariant: all engines hold the
-		// version currently visible to the setting. And we have the callback in
-		// place that will persist an incoming updated version on all engines
-		// before making it visible to the setting.
+		// version currently visible to the setting. Going forward whenever we
+		// set an active cluster version (`SetActiveClusterVersion`), we'll
+		// persist it to all the engines first (`WriteClusterVersionToEngines`).
+		// This happens at two places:
+		//
+		// - Right below, if we learn that we're the bootstrapping node, given
+		//   we'll be setting the active cluster version as the binary version.
+		// - Within the BumpClusterVersion RPC, when we're informed by another
+		//   node what our new active cluster version should be.
 	}
 
 	serverpb.RegisterInitServer(s.grpc.Server, initServer)
 
-	s.node.startAssertEngineHealth(ctx, s.engines)
+	// Register the Migration service, to power internal crdb migrations.
+	migrationServer := &migrationServer{server: s}
+	serverpb.RegisterMigrationServer(s.grpc.Server, migrationServer)
+	s.migrationServer = migrationServer // only for testing via TestServer
+
+	// Pebble does its own engine health checks, that call back into an event
+	// handler registered in storage/pebble.go when a slow disk event is
+	// detected. Starting a separate routine for Pebble is unnecessary.
+	if s.engines[0].Type() != enginepb.EngineTypePebble {
+		s.node.startAssertEngineHealth(ctx, s.engines, s.cfg.Settings)
+	}
 
 	// Start the RPC server. This opens the RPC/SQL listen socket,
 	// and dispatches the server worker for the RPC.
@@ -1231,8 +1266,21 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	conn, err := grpc.DialContext(ctx, s.cfg.AdvertiseAddr, append(
+
+	callCountInterceptor := func(
+		ctx context.Context,
+		method string,
+		req, reply interface{},
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
+		telemetry.Inc(getServerEndpointCounter(method))
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+	conn, err := grpc.DialContext(ctx, s.cfg.AdvertiseAddr, append(append(
 		dialOpts,
+		grpc.WithUnaryInterceptor(callCountInterceptor)),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return loopback.Connect(ctx)
 		}),
@@ -1261,18 +1309,20 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Write listener info files early in the startup sequence. `listenerInfo` has a comment.
 	listenerFiles := listenerInfo{
-		listenRPC:       s.cfg.Addr,
-		advertiseRPC:    s.cfg.AdvertiseAddr,
-		listenSQL:       s.cfg.SQLAddr,
-		advertiseSQL:    s.cfg.SQLAdvertiseAddr,
-		listenTenant:    s.cfg.TenantAddr,
-		advertiseTenant: s.cfg.TenantAdvertiseAddr,
-		listenHTTP:      s.cfg.HTTPAdvertiseAddr,
+		listenRPC:    s.cfg.Addr,
+		advertiseRPC: s.cfg.AdvertiseAddr,
+		listenSQL:    s.cfg.SQLAddr,
+		advertiseSQL: s.cfg.SQLAdvertiseAddr,
+		listenHTTP:   s.cfg.HTTPAdvertiseAddr,
 	}.Iter()
 
+	encryptedStore := false
 	for _, storeSpec := range s.cfg.Stores.Specs {
 		if storeSpec.InMemory {
 			continue
+		}
+		if len(storeSpec.ExtraOptions) > 0 {
+			encryptedStore = true
 		}
 
 		for name, val := range listenerFiles {
@@ -1283,16 +1333,10 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	// Filter the gossip bootstrap resolvers based on the listen and
-	// advertise addresses.
-	listenAddrU := util.NewUnresolvedAddr("tcp", s.cfg.Addr)
+	// NB: This needs to come after `startListenRPCAndSQL`, which determines
+	// what the advertised addr is going to be if nothing is explicitly
+	// provided.
 	advAddrU := util.NewUnresolvedAddr("tcp", s.cfg.AdvertiseAddr)
-	advSQLAddrU := util.NewUnresolvedAddr("tcp", s.cfg.SQLAdvertiseAddr)
-	advTenantAddrU := util.NewUnresolvedAddr("tcp", s.cfg.TenantAdvertiseAddr)
-	filtered := s.cfg.FilterGossipBootstrapResolvers(ctx, listenAddrU, advAddrU)
-
-	s.gossip.Start(advAddrU, filtered)
-	log.Event(ctx, "started gossip")
 
 	if s.cfg.DelayedBootstrapFn != nil {
 		defer time.AfterFunc(30*time.Second, s.cfg.DelayedBootstrapFn).Stop()
@@ -1300,13 +1344,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// We self bootstrap for when we're configured to do so, which should only
 	// happen during tests and for `cockroach start-single-node`.
-	selfBootstrap := s.cfg.AutoInitializeCluster && initServer.NeedsInit()
+	selfBootstrap := s.cfg.AutoInitializeCluster && initServer.NeedsBootstrap()
 	if selfBootstrap {
 		if _, err := initServer.Bootstrap(ctx, &serverpb.BootstrapRequest{}); err != nil {
 			return err
 		}
-	} else {
-		log.Info(ctx, "awaiting init command or join with an already initialized node.")
 	}
 
 	// Set up calling s.cfg.ReadyFn at the right time. Essentially, this call
@@ -1320,7 +1362,7 @@ func (s *Server) Start(ctx context.Context) error {
 		if s.cfg.ReadyFn != nil {
 			readyFn = s.cfg.ReadyFn
 		}
-		if !initServer.NeedsInit() || selfBootstrap {
+		if !initServer.NeedsBootstrap() || selfBootstrap {
 			onSuccessfulReturnFn = func() { readyFn(false /* waitForInit */) }
 			onInitServerReady = func() {}
 		} else {
@@ -1330,59 +1372,86 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	// This opens the main listener. When the listener is open, we can call
-	// initServerReadyFn since any request initiated to the initServer at that
-	// point will reach it once ServeAndWait starts handling the queue of incoming
-	// connections.
+	// onInitServerReady since any request initiated to the initServer at that
+	// point will reach it once ServeAndWait starts handling the queue of
+	// incoming connections.
 	startRPCServer(workersCtx)
 	onInitServerReady()
-	state, err := initServer.ServeAndWait(ctx, s.stopper, &s.cfg.Settings.SV, s.gossip)
+	state, initialStart, err := initServer.ServeAndWait(ctx, s.stopper, &s.cfg.Settings.SV)
 	if err != nil {
 		return errors.Wrap(err, "during init")
 	}
+	if err := state.validate(); err != nil {
+		return errors.Wrap(err, "invalid init state")
+	}
+
+	// Apply any cached initial settings (and start the gossip listener) as early
+	// as possible, to avoid spending time with stale settings.
+	if err := s.refreshSettings(state.initialSettingsKVs); err != nil {
+		return errors.Wrap(err, "during initializing settings updater")
+	}
+
+	// TODO(irfansharif): Let's make this unconditional. We could avoid
+	// persisting + initializing the cluster version in response to being
+	// bootstrapped (within `ServeAndWait` above) and simply do it here, in the
+	// same way we're doing for when we join an existing cluster.
+	if state.clusterVersion != initialDiskClusterVersion {
+		// We just learned about a cluster version different from the one we
+		// found on/synthesized from disk. This indicates that we're either the
+		// bootstrapping node (and are using the binary version as the cluster
+		// version), or we're joining an existing cluster that just informed us
+		// to activate the given cluster version.
+		//
+		// Either way, we'll do so by first persisting the cluster version
+		// itself, and then informing the version setting about it (an invariant
+		// we must up hold whenever setting a new active version).
+		if err := kvserver.WriteClusterVersionToEngines(
+			ctx, s.engines, state.clusterVersion,
+		); err != nil {
+			return err
+		}
+
+		if err := s.ClusterSettings().Version.SetActiveVersion(ctx, state.clusterVersion); err != nil {
+			return err
+		}
+	}
 
 	s.rpcContext.ClusterID.Set(ctx, state.clusterID)
-	// If there's no NodeID here, then we didn't just bootstrap. The Node will
-	// read its ID from the stores or request a new one via KV.
-	if state.nodeID != 0 {
-		s.rpcContext.NodeID.Set(ctx, state.nodeID)
-	}
+	s.rpcContext.NodeID.Set(ctx, state.nodeID)
+
+	// TODO(irfansharif): Now that we have our node ID, we should run another
+	// check here to make sure we've not been decommissioned away (if we're here
+	// following a server restart). See the discussions in #48843 for how that
+	// could be done, and what's motivating it.
+	//
+	// In summary: We'd consult our local store keys to see if they contain a
+	// kill file informing us we've been decommissioned away (the
+	// decommissioning process, that prefers to decommission live targets, will
+	// inform the target node to persist such a file).
+	//
+	// Short of that, if we were decommissioned in absentia, we'd attempt to
+	// reach out to already connected nodes in our join list to see if they have
+	// any knowledge of our node ID being decommissioned. This is something the
+	// decommissioning node will broadcast (best-effort) to cluster if the
+	// target node is unavailable, and is only done with the operator guarantee
+	// that this node is indeed never coming back. If we learn that we're not
+	// decommissioned, we'll solicit the decommissioned list from the already
+	// connected node to be able to respond to inbound decomm check requests.
+	//
+	// As for the problem of the ever growing list of decommissioned node IDs
+	// being maintained on each node, given that we're populating+broadcasting
+	// this list in best effort fashion (like said above, we're relying on the
+	// operator to guarantee that the target node is never coming back), perhaps
+	// it's also fine for us to age out the node ID list we maintain if it gets
+	// too large. Though even maintaining a max of 64 MB of decommissioned node
+	// IDs would likely outlive us all
+	//
+	//   536,870,912 bits/64 bits = 8,388,608 decommissioned node IDs.
 
 	// TODO(tbg): split this method here. Everything above this comment is
 	// the early stage of startup -- setting up listeners and determining the
 	// initState -- and everything after it is actually starting the server,
 	// using the listeners and init state.
-
-	// Defense in depth: set up an eager sanity check that we're not
-	// accidentally being pointed at a different cluster. We have checks for
-	// this in the RPC layer, but since the RPC layer gets set up before the
-	// clusterID is known, early connections won't validate the clusterID (at
-	// least not until the next Ping).
-	//
-	// The check is simple: listen for clusterID changes from Gossip. If we see
-	// one, make sure it's the clusterID we already know (and are guaranteed to
-	// know) at this point. If it's not the same, explode.
-	//
-	// TODO(tbg): remove this when we have changed ServeAndWait() to join an
-	// existing cluster via a one-off RPC, at which point we can create gossip
-	// (and thus the RPC layer) only after the clusterID is already known. We
-	// can then rely on the RPC layer's protection against cross-cluster
-	// communication.
-	{
-		// We populated this above, so it should still be set. This is just to
-		// demonstrate that we're not doing anything functional here (and to
-		// prevent bugs during further refactors).
-		if s.rpcContext.ClusterID.Get() == uuid.Nil {
-			return errors.New("gossip should already be connected")
-		}
-		unregister := s.gossip.RegisterCallback(gossip.KeyClusterID, func(string, roachpb.Value) {
-			clusterID, err := s.gossip.GetClusterID()
-			if err != nil {
-				log.Fatalf(ctx, "unable to read ClusterID: %v", err)
-			}
-			s.rpcContext.ClusterID.Set(ctx, clusterID) // fatals on mismatch
-		})
-		defer unregister()
-	}
 
 	// Spawn a goroutine that will print a nice message when Gossip connects.
 	// Note that we already know the clusterID, but we don't know that Gossip
@@ -1400,7 +1469,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	})
 
-	// NB: if this store is freshly bootstrapped (or no upper bound was
+	// NB: if this store is freshly initialized (or no upper bound was
 	// persisted), hlcUpperBound will be zero.
 	hlcUpperBound, err := kvserver.ReadMaxHLCUpperBound(ctx, s.engines)
 	if err != nil {
@@ -1426,15 +1495,20 @@ func (s *Server) Start(ctx context.Context) error {
 
 	onSuccessfulReturnFn()
 
+	// We're going to need to start gossip before we spin up Node below.
+	s.gossip.Start(advAddrU, filtered)
+	log.Event(ctx, "started gossip")
+
 	// Now that we have a monotonic HLC wrt previous incarnations of the process,
-	// init all the replicas. At this point *some* store has been bootstrapped or
+	// init all the replicas. At this point *some* store has been initialized or
 	// we're joining an existing cluster for the first time.
+	advSQLAddrU := util.NewUnresolvedAddr("tcp", s.cfg.SQLAdvertiseAddr)
 	if err := s.node.start(
 		ctx,
 		advAddrU,
 		advSQLAddrU,
-		advTenantAddrU,
 		*state,
+		initialStart,
 		s.cfg.ClusterName,
 		s.cfg.NodeAttributes,
 		s.cfg.Locality,
@@ -1457,14 +1531,13 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.replicationReporter.Start(ctx, s.stopper)
 
-	s.refreshSettings()
-
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetTags(map[string]string{
-			"cluster":     s.ClusterID().String(),
-			"node":        s.NodeID().String(),
-			"server_id":   fmt.Sprintf("%s-%s", s.ClusterID().Short(), s.NodeID()),
-			"engine_type": s.cfg.StorageEngine.String(),
+			"cluster":         s.ClusterID().String(),
+			"node":            s.NodeID().String(),
+			"server_id":       fmt.Sprintf("%s-%s", s.ClusterID().Short(), s.NodeID()),
+			"engine_type":     s.cfg.StorageEngine.String(),
+			"encrypted_store": strconv.FormatBool(encryptedStore),
 		})
 	})
 
@@ -1476,11 +1549,17 @@ func (s *Server) Start(ctx context.Context) error {
 		s.cfg.AdvertiseAddr,
 		s.cfg.HTTPAdvertiseAddr,
 		s.cfg.SQLAdvertiseAddr,
-		s.cfg.TenantAdvertiseAddr,
 	)
 
 	// Begin recording runtime statistics.
-	if err := s.startSampleEnvironment(ctx, base.DefaultMetricsSampleInterval); err != nil {
+	if err := startSampleEnvironment(s.AnnotateCtx(ctx), sampleEnvironmentCfg{
+		st:                   s.ClusterSettings(),
+		stopper:              s.stopper,
+		minSampleInterval:    base.DefaultMetricsSampleInterval,
+		goroutineDumpDirName: s.cfg.GoroutineDumpDirName,
+		heapProfileDirName:   s.cfg.HeapProfileDirName,
+		runtime:              s.runtime,
+	}); err != nil {
 		return err
 	}
 
@@ -1498,14 +1577,22 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	})
 
+	// After setting modeOperational, we can block until all stores are fully
+	// initialized.
 	s.grpc.setMode(modeOperational)
-	if s.tenantGRPC != nil {
-		s.tenantGRPC.setMode(modeOperational)
-	}
+
+	// We'll block here until all stores are fully initialized. We do this here
+	// for two reasons:
+	// - some of the components below depend on all stores being fully
+	//   initialized (like the debug server registration for e.g.)
+	// - we'll need to do it after having opened up the RPC floodgates (due to
+	//   the hazard described in Node.start, around initializing additional
+	//   stores)
+	s.node.waitForAdditionalStoreInit()
 
 	log.Infof(ctx, "starting %s server at %s (use: %s)",
-		s.cfg.HTTPRequestScheme(), s.cfg.HTTPAddr, s.cfg.HTTPAdvertiseAddr)
-	rpcConnType := "grpc/postgres"
+		redact.Safe(s.cfg.HTTPRequestScheme()), s.cfg.HTTPAddr, s.cfg.HTTPAdvertiseAddr)
+	rpcConnType := redact.SafeString("grpc/postgres")
 	if s.cfg.SplitListenSQL {
 		rpcConnType = "grpc"
 		log.Infof(ctx, "starting postgres server at %s (use: %s)", s.cfg.SQLAddr, s.cfg.SQLAdvertiseAddr)
@@ -1515,35 +1602,20 @@ func (s *Server) Start(ctx context.Context) error {
 
 	log.Event(ctx, "accepting connections")
 
-	if state.bootstrapped {
-		// If a new cluster is just starting up, force all the system ranges
-		// through the replication queue so they upreplicate as quickly as
-		// possible when a new node joins. Without this code, the upreplication
-		// would be up to the whim of the scanner, which might be too slow for
-		// new clusters.
-		// TODO(tbg): instead of this dubious band-aid we should make the
-		// replication queue reactive enough to avoid relying on the scanner
-		// alone.
-		var done bool
-		return s.node.stores.VisitStores(func(store *kvserver.Store) error {
-			if !done {
-				done = true
-				return store.ForceReplicationScanAndProcess()
-			}
-			return nil
-		})
-	}
-
 	// Begin the node liveness heartbeat. Add a callback which records the local
 	// store "last up" timestamp for every store whenever the liveness record is
 	// updated.
-	s.nodeLiveness.StartHeartbeat(ctx, s.stopper, s.engines, func(ctx context.Context) {
-		now := s.clock.Now()
-		if err := s.node.stores.VisitStores(func(s *kvserver.Store) error {
-			return s.WriteLastUpTimestamp(ctx, now)
-		}); err != nil {
-			log.Warningf(ctx, "writing last up timestamp: %v", err)
-		}
+	s.nodeLiveness.Start(ctx, liveness.NodeLivenessStartOptions{
+		Stopper: s.stopper,
+		Engines: s.engines,
+		OnSelfLive: func(ctx context.Context) {
+			now := s.clock.Now()
+			if err := s.node.stores.VisitStores(func(s *kvserver.Store) error {
+				return s.WriteLastUpTimestamp(ctx, now)
+			}); err != nil {
+				log.Warningf(ctx, "writing last up timestamp: %v", err)
+			}
+		},
 	})
 
 	// Begin recording status summaries.
@@ -1565,6 +1637,14 @@ func (s *Server) Start(ctx context.Context) error {
 	// something associated to SQL tenants.
 	s.startSystemLogsGC(ctx)
 
+	// OIDC Configuration must happen prior to the UI Handler being defined below so that we have
+	// the system settings initialized for it to pick up from the oidcAuthenticationServer.
+	oidc, err := ConfigureOIDC(ctx, s.ClusterSettings(), &s.mux, s.authentication.UserLoginFromSSO, s.cfg.AmbientCtx, s.ClusterID())
+	if err != nil {
+		return err
+	}
+	s.oidc = oidc
+
 	// Serve UI assets.
 	//
 	// The authentication mux used here is created in "allow anonymous" mode so that the UI
@@ -1577,6 +1657,7 @@ func (s *Server) Start(ctx context.Context) error {
 			ExperimentalUseLogin: s.cfg.EnableWebSessionAuthentication,
 			LoginEnabled:         s.cfg.RequireWebSession(),
 			NodeID:               s.nodeIDContainer,
+			OIDC:                 oidc,
 			GetUser: func(ctx context.Context) *string {
 				if u, ok := ctx.Value(webSessionUserKey{}).(string); ok {
 					return &u
@@ -1618,7 +1699,7 @@ func (s *Server) Start(ctx context.Context) error {
 				md := forwardAuthenticationMetadata(req.Context(), req)
 				authCtx := metadata.NewIncomingContext(req.Context(), md)
 				_, err := s.admin.requireAdminUser(authCtx)
-				if errors.Is(err, errInsufficientPrivilege) {
+				if errors.Is(err, errRequiresAdmin) {
 					http.Error(w, "admin privilege required", http.StatusUnauthorized)
 					return
 				} else if err != nil {
@@ -1637,16 +1718,12 @@ func (s *Server) Start(ctx context.Context) error {
 	// engine type as well as type of start (initial boot vs restart).
 	nodeStartCounter := "storage.engine."
 	switch s.cfg.StorageEngine {
+	case enginepb.EngineTypeDefault:
+		fallthrough
 	case enginepb.EngineTypePebble:
 		nodeStartCounter += "pebble."
-	case enginepb.EngineTypeDefault:
-		nodeStartCounter += "default."
-	case enginepb.EngineTypeRocksDB:
-		nodeStartCounter += "rocksdb."
-	case enginepb.EngineTypeTeePebbleRocksDB:
-		nodeStartCounter += "pebble+rocksdb."
 	}
-	if s.InitialBoot() {
+	if s.InitialStart() {
 		nodeStartCounter += "initial-boot"
 	} else {
 		nodeStartCounter += "restart"
@@ -1657,7 +1734,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// executes a SQL query, this must be done after the SQL layer is ready.
 	s.node.recordJoinEvent()
 
-	if err := s.sqlServer.start(
+	if err := s.sqlServer.preStart(
 		workersCtx,
 		s.stopper,
 		s.cfg.TestingKnobs,
@@ -1677,6 +1754,24 @@ func (s *Server) Start(ctx context.Context) error {
 	// started. At this point we know that all sqlmigrations have successfully
 	// been run so it is safe to upgrade to the binary's current version.
 	s.startAttemptUpgrade(ctx)
+
+	log.Event(ctx, "server initialized")
+	return nil
+}
+
+// AcceptClients starts listening for incoming SQL clients over the network.
+func (s *Server) AcceptClients(ctx context.Context) error {
+	workersCtx := s.AnnotateCtx(context.Background())
+
+	if err := s.sqlServer.startServeSQL(
+		workersCtx,
+		s.stopper,
+		s.sqlServer.connManager,
+		s.sqlServer.pgL,
+		s.cfg.SocketFile,
+	); err != nil {
+		return err
+	}
 
 	log.Event(ctx, "server ready")
 	return nil
@@ -1782,40 +1877,6 @@ func (s *Server) startListenRPCAndSQL(
 				netutil.FatalIfUnexpected(m.Serve())
 			})
 		})
-	}
-
-	if s.cfg.SplitListenTenant {
-		tenantL, err := listen(ctx, &s.cfg.TenantAddr, &s.cfg.TenantAdvertiseAddr, "tenant")
-		if err != nil {
-			return nil, nil, err
-		}
-		log.Eventf(ctx, "listening on tenant port %s", s.cfg.TenantAddr)
-
-		// The shutdown worker.
-		s.stopper.RunWorker(workersCtx, func(context.Context) {
-			<-s.stopper.ShouldQuiesce()
-			netutil.FatalIfUnexpected(tenantL.Close())
-			<-s.stopper.ShouldStop()
-			s.tenantGRPC.Stop()
-		})
-
-		// Compose startup functions.
-		startPrimaryRPCServer := startRPCServer
-		startTenantRPCServer := func(ctx context.Context) {
-			s.stopper.RunWorker(workersCtx, func(context.Context) {
-				netutil.FatalIfUnexpected(s.tenantGRPC.Serve(tenantL))
-			})
-		}
-		startRPCServer = func(ctx context.Context) {
-			startPrimaryRPCServer(ctx)
-			startTenantRPCServer(ctx)
-		}
-	} else {
-		// If the tenant port is not split, the actual listen and advertise
-		// addresses for tenant KV become equal to that of RPC, regardless
-		// of what was configured.
-		s.cfg.TenantAddr = s.cfg.Addr
-		s.cfg.TenantAdvertiseAddr = s.cfg.AdvertiseAddr
 	}
 
 	return pgL, startRPCServer, nil
@@ -1937,16 +1998,16 @@ func (s *sqlServer) startServeSQL(
 
 // Decommission idempotently sets the decommissioning flag for specified nodes.
 func (s *Server) Decommission(
-	ctx context.Context, targetStatus kvserverpb.MembershipStatus, nodeIDs []roachpb.NodeID,
+	ctx context.Context, targetStatus livenesspb.MembershipStatus, nodeIDs []roachpb.NodeID,
 ) error {
-	if !s.st.Version.IsActive(ctx, clusterversion.VersionNodeMembershipStatus) {
+	if !s.st.Version.IsActive(ctx, clusterversion.NodeMembershipStatus) {
 		if targetStatus.Decommissioned() {
 			// In mixed-version cluster settings, we need to ensure that we're
 			// on-the-wire compatible with nodes only familiar with the boolean
 			// representation of membership state. We do the simple thing and
 			// simply disallow the setting of the fully decommissioned state until
 			// we're guaranteed to be on v20.2.
-			targetStatus = kvserverpb.MembershipStatus_DECOMMISSIONING
+			targetStatus = livenesspb.MembershipStatus_DECOMMISSIONING
 		}
 	}
 
@@ -1965,6 +2026,9 @@ func (s *Server) Decommission(
 	for _, nodeID := range nodeIDs {
 		statusChanged, err := s.nodeLiveness.SetMembershipStatus(ctx, nodeID, targetStatus)
 		if err != nil {
+			if errors.Is(err, liveness.ErrMissingRecord) {
+				return grpcstatus.Error(codes.NotFound, liveness.ErrMissingRecord.Error())
+			}
 			return err
 		}
 		if statusChanged {
@@ -1986,22 +2050,29 @@ func (s *Server) Decommission(
 	return nil
 }
 
-// startSampleEnvironment begins the heap profiler worker.
-func (s *Server) startSampleEnvironment(
-	ctx context.Context, minSampleInterval time.Duration,
-) error {
+type sampleEnvironmentCfg struct {
+	st                   *cluster.Settings
+	stopper              *stop.Stopper
+	minSampleInterval    time.Duration
+	goroutineDumpDirName string
+	heapProfileDirName   string
+	runtime              *status.RuntimeStatSampler
+}
+
+// startSampleEnvironment starts a periodic loop that samples the environment and,
+// when appropriate, creates goroutine and/or heap dumps.
+func startSampleEnvironment(ctx context.Context, cfg sampleEnvironmentCfg) error {
 	// Immediately record summaries once on server startup.
-	ctx = s.AnnotateCtx(ctx)
 
 	// Initialize a goroutine dumper if we have an output directory
 	// specified.
 	var goroutineDumper *goroutinedumper.GoroutineDumper
-	if s.cfg.GoroutineDumpDirName != "" {
+	if cfg.goroutineDumpDirName != "" {
 		hasValidDumpDir := true
-		if err := os.MkdirAll(s.cfg.GoroutineDumpDirName, 0755); err != nil {
+		if err := os.MkdirAll(cfg.goroutineDumpDirName, 0755); err != nil {
 			// This is possible when running with only in-memory stores;
 			// in that case the start-up code sets the output directory
-			// to the current directory (.). If wrunning the process
+			// to the current directory (.). If running the process
 			// from a directory which is not writable, we won't
 			// be able to create a sub-directory here.
 			log.Warningf(ctx, "cannot create goroutine dump dir -- goroutine dumps will be disabled: %v", err)
@@ -2009,7 +2080,7 @@ func (s *Server) startSampleEnvironment(
 		}
 		if hasValidDumpDir {
 			var err error
-			goroutineDumper, err = goroutinedumper.NewGoroutineDumper(ctx, s.cfg.GoroutineDumpDirName, s.ClusterSettings())
+			goroutineDumper, err = goroutinedumper.NewGoroutineDumper(ctx, cfg.goroutineDumpDirName, cfg.st)
 			if err != nil {
 				return errors.Wrap(err, "starting goroutine dumper worker")
 			}
@@ -2021,9 +2092,9 @@ func (s *Server) startSampleEnvironment(
 	var heapProfiler *heapprofiler.HeapProfiler
 	var nonGoAllocProfiler *heapprofiler.NonGoAllocProfiler
 	var statsProfiler *heapprofiler.StatsProfiler
-	if s.cfg.HeapProfileDirName != "" {
+	if cfg.heapProfileDirName != "" {
 		hasValidDumpDir := true
-		if err := os.MkdirAll(s.cfg.HeapProfileDirName, 0755); err != nil {
+		if err := os.MkdirAll(cfg.heapProfileDirName, 0755); err != nil {
 			// This is possible when running with only in-memory stores;
 			// in that case the start-up code sets the output directory
 			// to the current directory (.). If wrunning the process
@@ -2035,37 +2106,37 @@ func (s *Server) startSampleEnvironment(
 
 		if hasValidDumpDir {
 			var err error
-			heapProfiler, err = heapprofiler.NewHeapProfiler(ctx, s.cfg.HeapProfileDirName, s.ClusterSettings())
+			heapProfiler, err = heapprofiler.NewHeapProfiler(ctx, cfg.heapProfileDirName, cfg.st)
 			if err != nil {
 				return errors.Wrap(err, "starting heap profiler worker")
 			}
-			nonGoAllocProfiler, err = heapprofiler.NewNonGoAllocProfiler(ctx, s.cfg.HeapProfileDirName, s.ClusterSettings())
+			nonGoAllocProfiler, err = heapprofiler.NewNonGoAllocProfiler(ctx, cfg.heapProfileDirName, cfg.st)
 			if err != nil {
 				return errors.Wrap(err, "starting non-go alloc profiler worker")
 			}
-			statsProfiler, err = heapprofiler.NewStatsProfiler(ctx, s.cfg.HeapProfileDirName, s.ClusterSettings())
+			statsProfiler, err = heapprofiler.NewStatsProfiler(ctx, cfg.heapProfileDirName, cfg.st)
 			if err != nil {
 				return errors.Wrap(err, "starting memory stats collector worker")
 			}
 		}
 	}
 
-	s.stopper.RunWorker(ctx, func(ctx context.Context) {
+	cfg.stopper.RunWorker(ctx, func(ctx context.Context) {
 		var goMemStats atomic.Value // *status.GoMemStats
 		goMemStats.Store(&status.GoMemStats{})
 		var collectingMemStats int32 // atomic, 1 when stats call is ongoing
 
 		timer := timeutil.NewTimer()
 		defer timer.Stop()
-		timer.Reset(minSampleInterval)
+		timer.Reset(cfg.minSampleInterval)
 
 		for {
 			select {
-			case <-s.stopper.ShouldStop():
+			case <-cfg.stopper.ShouldStop():
 				return
 			case <-timer.C:
 				timer.Read = true
-				timer.Reset(minSampleInterval)
+				timer.Reset(cfg.minSampleInterval)
 
 				// We read the heap stats on another goroutine and give up after 1s.
 				// This is necessary because as of Go 1.12, runtime.ReadMemStats()
@@ -2076,7 +2147,7 @@ func (s *Server) startSampleEnvironment(
 				// this hasn't been observed to be a problem.
 				statsCollected := make(chan struct{})
 				if atomic.CompareAndSwapInt32(&collectingMemStats, 0, 1) {
-					if err := s.stopper.RunAsyncTask(ctx, "get-mem-stats", func(ctx context.Context) {
+					if err := cfg.stopper.RunAsyncTask(ctx, "get-mem-stats", func(ctx context.Context) {
 						var ms status.GoMemStats
 						runtime.ReadMemStats(&ms.MemStats)
 						ms.Collected = timeutil.Now()
@@ -2098,14 +2169,14 @@ func (s *Server) startSampleEnvironment(
 
 				curStats := goMemStats.Load().(*status.GoMemStats)
 				cgoStats := status.GetCGoMemStats(ctx)
-				s.runtime.SampleEnvironment(ctx, curStats, cgoStats)
+				cfg.runtime.SampleEnvironment(ctx, curStats, cgoStats)
 				if goroutineDumper != nil {
-					goroutineDumper.MaybeDump(ctx, s.ClusterSettings(), s.runtime.Goroutines.Value())
+					goroutineDumper.MaybeDump(ctx, cfg.st, cfg.runtime.Goroutines.Value())
 				}
 				if heapProfiler != nil {
-					heapProfiler.MaybeTakeProfile(ctx, s.runtime.GoAllocBytes.Value())
-					nonGoAllocProfiler.MaybeTakeProfile(ctx, s.runtime.CgoTotalBytes.Value())
-					statsProfiler.MaybeTakeProfile(ctx, s.runtime.RSSBytes.Value(), curStats, cgoStats)
+					heapProfiler.MaybeTakeProfile(ctx, cfg.runtime.GoAllocBytes.Value())
+					nonGoAllocProfiler.MaybeTakeProfile(ctx, cfg.runtime.CgoTotalBytes.Value())
+					statsProfiler.MaybeTakeProfile(ctx, cfg.runtime.RSSBytes.Value(), curStats, cgoStats)
 				}
 			}
 		}
@@ -2296,4 +2367,9 @@ func (s *Server) RunLocalSQL(
 	ctx context.Context, fn func(ctx context.Context, sqlExec *sql.InternalExecutor) error,
 ) error {
 	return fn(ctx, s.sqlServer.internalExecutor)
+}
+
+// Insecure returns true iff the server has security disabled.
+func (s *Server) Insecure() bool {
+	return s.cfg.Insecure
 }

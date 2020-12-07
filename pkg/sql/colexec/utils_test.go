@@ -139,7 +139,7 @@ func (t tuple) less(other tuple, evalCtx *tree.EvalContext) bool {
 		case "string":
 			return lhsVal.String() < rhsVal.String()
 		default:
-			colexecerror.InternalError(fmt.Sprintf("Unhandled comparison type: %s", typ))
+			colexecerror.InternalError(errors.AssertionFailedf("Unhandled comparison type: %s", typ))
 		}
 	}
 	return false
@@ -323,10 +323,10 @@ func runTestsWithTyps(
 				"non-nulls in the input tuples, we expect for all nulls injection to "+
 				"change the output")
 		}
-		if c, ok := originalOp.(Closer); ok {
+		if c, ok := originalOp.(colexecbase.Closer); ok {
 			require.NoError(t, c.Close(ctx))
 		}
-		if c, ok := opWithNulls.(Closer); ok {
+		if c, ok := opWithNulls.(colexecbase.Closer); ok {
 			require.NoError(t, c.Close(ctx))
 		}
 	}
@@ -434,7 +434,7 @@ func runTestsWithoutAllNullsInjection(
 					assert.False(t, maybeHasNulls(b))
 				}
 			}
-			if c, ok := op.(Closer); ok {
+			if c, ok := op.(colexecbase.Closer); ok {
 				// Some operators need an explicit Close if not drained completely of
 				// input.
 				assert.NoError(t, c.Close(ctx))
@@ -584,7 +584,7 @@ func setColVal(vec coldata.Vec, idx int, val interface{}, evalCtx *tree.EvalCont
 			decimalVal, _, err := apd.NewFromString(fmt.Sprintf("%f", floatVal))
 			if err != nil {
 				colexecerror.InternalError(
-					fmt.Sprintf("unable to set decimal %f: %v", floatVal, err))
+					errors.AssertionFailedf("unable to set decimal %f: %v", floatVal, err))
 			}
 			// .Set is used here instead of assignment to ensure the pointer address
 			// of the underlying storage for apd.Decimal remains the same. This can
@@ -602,7 +602,7 @@ func setColVal(vec coldata.Vec, idx int, val interface{}, evalCtx *tree.EvalCont
 		case json.JSON:
 			vec.Datum().Set(idx, &tree.DJSON{JSON: v})
 		default:
-			colexecerror.InternalError(fmt.Sprintf("unexpected type %T of datum-backed value: %v", v, v))
+			colexecerror.InternalError(errors.AssertionFailedf("unexpected type %T of datum-backed value: %v", v, v))
 		}
 	} else {
 		reflect.ValueOf(vec.Col()).Index(idx).Set(reflect.ValueOf(val).Convert(reflect.TypeOf(vec.Col()).Elem()))
@@ -693,7 +693,7 @@ func newOpTestSelInput(rng *rand.Rand, batchSize int, tuples tuples, typs []*typ
 func (s *opTestInput) Init() {
 	if s.typs == nil {
 		if len(s.tuples) == 0 {
-			colexecerror.InternalError("empty tuple source with no specified types")
+			colexecerror.InternalError(errors.AssertionFailedf("empty tuple source with no specified types"))
 		}
 		s.typs = extrapolateTypesFromTuples(s.tuples)
 	}
@@ -720,7 +720,7 @@ func (s *opTestInput) Next(context.Context) coldata.Batch {
 	tupleLen := len(tups[0])
 	for i := range tups {
 		if len(tups[i]) != tupleLen {
-			colexecerror.InternalError(fmt.Sprintf("mismatched tuple lens: found %+v expected %d vals",
+			colexecerror.InternalError(errors.AssertionFailedf("mismatched tuple lens: found %+v expected %d vals",
 				tups[i], tupleLen))
 		}
 	}
@@ -792,7 +792,7 @@ func (s *opTestInput) Next(context.Context) coldata.Batch {
 						d := apd.Decimal{}
 						_, err := d.SetFloat64(rng.Float64())
 						if err != nil {
-							colexecerror.InternalError(fmt.Sprintf("%v", err))
+							colexecerror.InternalError(errors.AssertionFailedf("%v", err))
 						}
 						col.Index(outputIdx).Set(reflect.ValueOf(d))
 					case types.BytesFamily:
@@ -811,13 +811,13 @@ func (s *opTestInput) Next(context.Context) coldata.Batch {
 						case types.TupleFamily:
 							setColVal(vec, outputIdx, stringToDatum("(NULL)", vec.Type(), s.evalCtx), s.evalCtx)
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unexpected datum-backed type: %s", vec.Type()))
+							colexecerror.InternalError(errors.AssertionFailedf("unexpected datum-backed type: %s", vec.Type()))
 						}
 					default:
 						if val, ok := quick.Value(reflect.TypeOf(vec.Col()).Elem(), rng); ok {
 							setColVal(vec, outputIdx, val.Interface(), s.evalCtx)
 						} else {
-							colexecerror.InternalError(fmt.Sprintf("could not generate a random value of type %s", vec.Type()))
+							colexecerror.InternalError(errors.AssertionFailedf("could not generate a random value of type %s", vec.Type()))
 						}
 					}
 				}
@@ -868,7 +868,7 @@ func newOpFixedSelTestInput(
 func (s *opFixedSelTestInput) Init() {
 	if s.typs == nil {
 		if len(s.tuples) == 0 {
-			colexecerror.InternalError("empty tuple source with no specified types")
+			colexecerror.InternalError(errors.AssertionFailedf("empty tuple source with no specified types"))
 		}
 		s.typs = extrapolateTypesFromTuples(s.tuples)
 	}
@@ -877,7 +877,7 @@ func (s *opFixedSelTestInput) Init() {
 	tupleLen := len(s.tuples[0])
 	for _, i := range s.sel {
 		if len(s.tuples[i]) != tupleLen {
-			colexecerror.InternalError(fmt.Sprintf("mismatched tuple lens: found %+v expected %d vals",
+			colexecerror.InternalError(errors.AssertionFailedf("mismatched tuple lens: found %+v expected %d vals",
 				s.tuples[i], tupleLen))
 		}
 	}
@@ -1465,6 +1465,46 @@ func (tc *joinTestCase) init() {
 	}
 }
 
+// mirror attempts to create a "mirror" test case of tc and returns nil if it
+// can't (a "mirror" test case is derived from the original one by swapping the
+// inputs and adjusting all of the corresponding fields accordingly). Currently
+// it works only for LEFT SEMI and LEFT ANTI join types.
+// TODO(yuzefovich): extend this to other join types when possible.
+func (tc *joinTestCase) mirror() *joinTestCase {
+	switch tc.joinType {
+	case descpb.LeftSemiJoin, descpb.LeftAntiJoin:
+	default:
+		return nil
+	}
+	mirroringCase := *tc
+	mirroringCase.description = strings.ReplaceAll(tc.description, "LEFT", "RIGHT")
+	if tc.joinType == descpb.LeftSemiJoin {
+		mirroringCase.joinType = descpb.RightSemiJoin
+	} else {
+		mirroringCase.joinType = descpb.RightAntiJoin
+	}
+	mirroringCase.leftTuples, mirroringCase.rightTuples = mirroringCase.rightTuples, mirroringCase.leftTuples
+	mirroringCase.leftTypes, mirroringCase.rightTypes = mirroringCase.rightTypes, mirroringCase.leftTypes
+	mirroringCase.leftOutCols, mirroringCase.rightOutCols = mirroringCase.rightOutCols, mirroringCase.leftOutCols
+	mirroringCase.leftEqCols, mirroringCase.rightEqCols = mirroringCase.rightEqCols, mirroringCase.leftEqCols
+	mirroringCase.leftDirections, mirroringCase.rightDirections = mirroringCase.rightDirections, mirroringCase.leftDirections
+	mirroringCase.leftEqColsAreKey, mirroringCase.rightEqColsAreKey = mirroringCase.rightEqColsAreKey, mirroringCase.leftEqColsAreKey
+	// TODO(yuzefovich): once we support ON expression in more join types, this
+	// method will need to update non-empty ON expressions as well.
+	return &mirroringCase
+}
+
+// withMirrors will add all "mirror" test cases.
+func withMirrors(testCases []*joinTestCase) []*joinTestCase {
+	numOrigTestCases := len(testCases)
+	for _, c := range testCases[:numOrigTestCases] {
+		if mirror := c.mirror(); mirror != nil {
+			testCases = append(testCases, mirror)
+		}
+	}
+	return testCases
+}
+
 // mutateTypes returns a slice of joinTestCases with varied types. Assumes
 // the input is made up of just int64s. Calling this
 func (tc *joinTestCase) mutateTypes() []*joinTestCase {
@@ -1526,7 +1566,7 @@ type sortTestCase struct {
 	typs        []*types.T
 	ordCols     []execinfrapb.Ordering_Column
 	matchLen    int
-	k           int
+	k           uint64
 }
 
 // Mock typing context for the typechecker.
@@ -1589,6 +1629,7 @@ func createTestProjectingOperator(
 		Post: execinfrapb.PostProcessSpec{
 			RenderExprs: renderExprs,
 		},
+		ResultTypes: append(inputTypes, typedExpr.ResolvedType()),
 	}
 	args := &NewColOperatorArgs{
 		Spec:                spec,

@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
+	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/kr/text"
 )
 
@@ -145,13 +147,6 @@ percentage of physical memory (e.g. .25). If left unspecified, defaults to 25% o
 physical memory.`,
 	}
 
-	SQLAuditLogDirName = FlagInfo{
-		Name: "sql-audit-dir",
-		Description: `
-If non-empty, create a SQL audit log in this drectory.
-`,
-	}
-
 	SQLTempStorage = FlagInfo{
 		Name: "max-disk-temp-storage",
 		Description: `
@@ -256,7 +251,20 @@ Execute the SQL statement(s) on the command line, then exit. This flag may be
 specified multiple times and each value may contain multiple semicolon
 separated statements. If an error occurs in any statement, the command exits
 with a non-zero status code and further statements are not executed. The
-results of each SQL statement are printed on the standard output.`,
+results of each SQL statement are printed on the standard output.
+
+This flag is incompatible with --file / -f.`,
+	}
+
+	File = FlagInfo{
+		Name:      "file",
+		Shorthand: "f",
+		Description: `
+Read and execute the SQL statement(s) from the specified file.
+The file is processed as if it has been redirected on the standard
+input of the shell.
+
+This flag is incompatible with --execute / -e.`,
 	}
 
 	Watch = FlagInfo{
@@ -518,59 +526,6 @@ The port number should be the same as in --sql-addr unless port
 forwarding is set up on an intermediate firewall/router.`,
 	}
 
-	ListenTenantAddr = FlagInfo{
-		Name: "tenant-addr",
-		Description: `
-The hostname or IP address to bind to for tenant KV clients, for example
---tenant-addr=myhost:26257 or --tenant-addr=:26257 (listen on all
-interfaces). If left unspecified, the address specified by --listen-addr
-will be used for both RPC and SQL connections.
-<PRE>
-
-</PRE>
-If specified but the address part is omitted, the address part defaults
-to the address part of --listen-addr. If specified but the port number
-is omitted, the port number defaults to 26257.
-<PRE>
-
-</PRE>
-To actually use separate bindings, it is recommended to specify both
-flags and use a different port number via --listen-addr, for example
---tenant-addr=:36257 --listen-addr=:26257. Ensure that --join is set
-accordingly on other nodes. It is also possible to use the same port
-number but separate host addresses.
-<PRE>
-
-</PRE>
-An IPv6 address can also be specified with the notation [...], for
-example [::1]:26257 or [fe80::f6f2:::]:26257.`,
-	}
-
-	TenantAdvertiseAddr = FlagInfo{
-		Name: "advertise-tenant-addr",
-		Description: `
-The address/hostname and port to advertise to tenant SQL nodes for
-tenant KV communication. It must resolve and be routable from other
-nodes in the cluster.
-<PRE>
-
-</PRE>
-If left unspecified, it defaults to the setting of --tenant-addr. If the
-flag is provided but either the address part or the port part is left
-unspecified, that particular part defaults to the same part in
---tenant-addr.
-<PRE>
-
-</PRE>
-An IPv6 address can also be specified with the notation [...], for
-example [::1]:26257 or [fe80::f6f2:::]:26257.
-<PRE>
-
-</PRE>
-The port number should be the same as in --tenant-addr unless port
-forwarding is set up on an intermediate firewall/router.`,
-	}
-
 	ListenHTTPAddr = FlagInfo{
 		Name: "http-addr",
 		Description: `
@@ -588,6 +543,16 @@ When specified, restricts HTTP connections to localhost-only and disables
 TLS for the HTTP interface. The hostname part of --http-addr, if specified,
 is then ignored. This flag is intended for use to facilitate
 local testing without requiring certificate setups in web browsers.`,
+	}
+
+	AcceptSQLWithoutTLS = FlagInfo{
+		Name: "accept-sql-without-tls",
+		Description: `
+When specified, this node will accept SQL client connections that do not wish
+to negotiate a TLS handshake. Authentication is still otherwise required
+as per the HBA configuration and all other security mechanisms continue to
+apply. This flag is experimental.
+`,
 	}
 
 	LocalityAdvertiseAddr = FlagInfo{
@@ -656,18 +621,33 @@ the socket name programmatically. To use, for example:
 		Name:   "insecure",
 		EnvVar: "COCKROACH_INSECURE",
 		Description: `
-Connect to an insecure cluster. This is strongly discouraged for
-production usage.`,
+Connect to a cluster without using TLS nor authentication.
+This makes the client-server connection vulnerable to MITM attacks. Use with care.`,
 	}
 
 	ServerInsecure = FlagInfo{
 		Name: "insecure",
 		Description: `
-Start an insecure node, using unencrypted (non-TLS) connections,
-listening on all IP addresses (unless --listen-addr is provided) and
-disabling password authentication for all database users. This is
-strongly discouraged for production usage and should never be used on
-a public network without combining it with --listen-addr.`,
+Start a node with all security controls disabled.
+There is no encryption, no authentication and internal security
+checks are also disabled. This makes any client able to take
+over the entire cluster.
+<PRE>
+
+</PRE>
+This flag is only intended for non-production testing.
+<PRE>
+
+</PRE>
+Beware that using this flag on a public network without --listen-addr
+is likely to cause the entire host server to become compromised.
+<PRE>
+
+</PRE>
+To simply accept non-TLS connections for SQL clients while keeping
+the cluster secure, consider using --accept-sql-without-tls instead.
+Also see: ` + build.MakeIssueURL(53404) + `
+`,
 	}
 
 	ExternalIODisableHTTP = FlagInfo{
@@ -841,12 +821,9 @@ Also, if you use equal signs in the file path to a store, you must use the
 	StorageEngine = FlagInfo{
 		Name: "storage-engine",
 		Description: `
-Storage engine to use for all stores on this cockroach node. Options are default,
-rocksdb, or pebble.
-
-If default is specified, the storage engine last used to write to the first
-store directory is used (see --store). If the store directory is uninitialized
-and default is specified, rocksdb is used as the default storage engine.`,
+Storage engine to use for all stores on this cockroach node. The only option is pebble. Deprecated;
+only present for backward compatibility.
+`,
 	}
 
 	Size = FlagInfo{
@@ -982,11 +959,19 @@ If specified, print the system config contents. Beware that the output will be
 long and not particularly human-readable.`,
 	}
 
+	DecodeAsTable = FlagInfo{
+		Name: "decode-as-table",
+		Description: `
+Base64-encoded Descriptor to use as the table when decoding KVs.`,
+	}
+
 	DrainWait = FlagInfo{
 		Name: "drain-wait",
 		Description: `
-When non-zero, wait for the specified amount of time for the node to
-drain all active client connections and migrate away range leases.`,
+When non-zero, wait for at most the specified amount of time for the node to
+drain all active client connections and migrate away range leases.
+If zero, the command waits until the last client has disconnected and
+all range leases have been migrated away.`,
 	}
 
 	Wait = FlagInfo{
@@ -1068,6 +1053,20 @@ The line length where sqlfmt will try to wrap.`,
 		Description: `Align the output.`,
 	}
 
+	DemoSQLPort = FlagInfo{
+		Name: "sql-port",
+		Description: `First port number for SQL servers.
+There should be as many TCP ports available as the value of --nodes
+starting at the specified value.`,
+	}
+
+	DemoHTTPPort = FlagInfo{
+		Name: "http-port",
+		Description: `First port number for HTTP servers.
+There should be as many TCP ports available as the value of --nodes
+starting at the specified value.`,
+	}
+
 	DemoNodes = FlagInfo{
 		Name:        "nodes",
 		Description: `How many in-memory nodes to create for the demo.`,
@@ -1116,7 +1115,7 @@ availability zone to 3.
 
 	DemoGeoPartitionedReplicas = FlagInfo{
 		Name: "geo-partitioned-replicas",
-		Description: `
+		Description: fmt.Sprintf(`
 When used with the Movr dataset, create a 9 node cluster and automatically apply
 the geo-partitioned replicas topology across 3 virtual regions named us-east1,
 us-west1, and europe-west1. This command will fail with an error if an
@@ -1124,9 +1123,9 @@ enterprise license could not be acquired, or if the Movr dataset is not used.
 More information about the geo-partitioned replicas topology can be found at:
 <PRE>
 
-https://www.cockroachlabs.com/docs/v19.1/topology-geo-partitioned-replicas.html
+%s
 </PRE>
-		`,
+		`, docs.URL("topology-geo-partitioned-replicas.html")),
 	}
 
 	DemoNoLicense = FlagInfo{
@@ -1143,9 +1142,9 @@ the demo shell.`,
 	}
 
 	GeoLibsDir = FlagInfo{
-		Name: "geo-libs",
+		Name: "spatial-libs",
 		Description: `
-The location where all libraries for Geospatial operations is located.`,
+The location where all libraries for spatial operations is located.`,
 	}
 
 	Global = FlagInfo{
@@ -1153,35 +1152,6 @@ The location where all libraries for Geospatial operations is located.`,
 		Description: `
 Simulate a global cluster. This adds artificial latencies to nodes in different
 regions. This flag only works with the default node localities. This setting is experimental.`,
-	}
-
-	LogDir = FlagInfo{
-		Name: "log-dir",
-		Description: `
-If non-empty, write log files in this directory. If empty, write log files to
-<store-dir>/logs where <store-dir> is the directory of the first on disk store.
-`,
-	}
-
-	LogDirMaxSize = FlagInfo{
-		Name: "log-group-max-size",
-		Description: `
-Maximum combined size of all log files in a logging group.
-`,
-	}
-
-	LogFileMaxSize = FlagInfo{
-		Name: "log-file-max-size",
-		Description: `
-Maximum size of each log file.
-`,
-	}
-
-	LogFileVerbosity = FlagInfo{
-		Name: "log-file-verbosity",
-		Description: `
-Minimum verbosity of messages written to the log file.
-`,
 	}
 
 	WriteSize = FlagInfo{
@@ -1273,5 +1243,69 @@ The zip command will block for the duration specified. Zero disables this featur
 	StmtDiagCancelAll = FlagInfo{
 		Name:        "all",
 		Description: `Cancel all outstanding requests.`,
+	}
+
+	ImportSkipForeignKeys = FlagInfo{
+		Name: "skip-foreign-keys",
+		Description: `
+Speed up data import by ignoring foreign key constraints in the dump file's DDL.
+Also enables importing individual tables that would otherwise fail due to
+dependencies on other tables.
+`,
+	}
+
+	ImportMaxRowSize = FlagInfo{
+		Name: "max-row-size",
+		Description: `
+Override limits on line size when importing Postgres dump files. This setting 
+may need to be tweaked if the Postgres dump file has extremely long lines.
+`,
+	}
+
+	Log = FlagInfo{
+		Name:        "log",
+		Description: `Logging configuration. See the documentation for details.`,
+	}
+
+	DeprecatedStderrThreshold = FlagInfo{
+		Name:        "logtostderr",
+		Description: `Write log messages beyond the specified severity to stderr.`,
+	}
+
+	DeprecatedFileThreshold = FlagInfo{
+		Name:        "log-file-verbosity",
+		Description: `Write log messages beyond the specified severity to files.`,
+	}
+
+	DeprecatedStderrNoColor = FlagInfo{
+		Name:        "no-color",
+		Description: `Avoid color in the stderr output.`,
+	}
+
+	DeprecatedRedactableLogs = FlagInfo{
+		Name:        "redactable-logs",
+		Description: `Request redaction markers.`,
+	}
+
+	DeprecatedLogFileMaxSize = FlagInfo{
+		Name:        "log-file-max-size",
+		Description: "Maximum size of a log file before switching to a new file.",
+	}
+
+	DeprecatedLogGroupMaxSize = FlagInfo{
+		Name:        "log-group-max-size",
+		Description: `Maximum size of a group of log files before old files are removed.`,
+	}
+
+	DeprecatedLogDir = FlagInfo{
+		Name:        "log-dir",
+		Description: `Override the logging directory.`,
+	}
+
+	DeprecatedSQLAuditLogDir = FlagInfo{
+		Name: "sql-audit-dir",
+		Description: `
+If non-empty, create a SQL audit log in this directory.
+`,
 	}
 )

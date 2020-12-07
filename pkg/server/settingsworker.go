@@ -18,24 +18,28 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
 
-// RefreshSettings starts a settings-changes listener.
-func (s *Server) refreshSettings() {
-	tbl := sqlbase.SettingsTable
+func processSystemConfigKVs(
+	ctx context.Context, kvs []roachpb.KeyValue, u settings.Updater, eng storage.Engine,
+) error {
+	tbl := systemschema.SettingsTable
 
-	a := &sqlbase.DatumAlloc{}
+	a := &rowenc.DatumAlloc{}
 	codec := keys.TODOSQLCodec
 	settingsTablePrefix := codec.TablePrefix(uint32(tbl.ID))
 	colIdxMap := row.ColIDtoRowIndexFromCols(tbl.Columns)
 
+	var settingsKVs []roachpb.KeyValue
 	processKV := func(ctx context.Context, kv roachpb.KeyValue, u settings.Updater) error {
 		if !bytes.HasPrefix(kv.Key, settingsTablePrefix) {
 			return nil
@@ -45,8 +49,8 @@ func (s *Server) refreshSettings() {
 		// First we need to decode the setting name field from the index key.
 		{
 			types := []*types.T{tbl.Columns[0].Type}
-			nameRow := make([]sqlbase.EncDatum, 1)
-			_, matches, _, err := sqlbase.DecodeIndexKey(codec, tbl, &tbl.PrimaryIndex, types, nameRow, nil, kv.Key)
+			nameRow := make([]rowenc.EncDatum, 1)
+			_, matches, _, err := rowenc.DecodeIndexKey(codec, tbl, &tbl.PrimaryIndex, types, nameRow, nil, kv.Key)
 			if err != nil {
 				return errors.Wrap(err, "failed to decode key")
 			}
@@ -78,8 +82,8 @@ func (s *Server) refreshSettings() {
 				}
 				colID := lastColID + descpb.ColumnID(colIDDiff)
 				lastColID = colID
-				if idx, ok := colIdxMap[colID]; ok {
-					res, bytes, err = sqlbase.DecodeTableValue(a, tbl.Columns[idx].Type, bytes)
+				if idx, ok := colIdxMap.Get(colID); ok {
+					res, bytes, err = rowenc.DecodeTableValue(a, tbl.Columns[idx].Type, bytes)
 					if err != nil {
 						return err
 					}
@@ -97,14 +101,35 @@ func (s *Server) refreshSettings() {
 				}
 			}
 		}
+		settingsKVs = append(settingsKVs, kv)
 
 		if err := u.Set(k, v, t); err != nil {
 			log.Warningf(ctx, "setting %q to %q failed: %+v", k, v, err)
 		}
 		return nil
 	}
+	for _, kv := range kvs {
+		if err := processKV(ctx, kv, u); err != nil {
+			return errors.Wrap(err, `while decoding settings data
+this likely indicates the settings table structure or encoding has been altered;
+skipping settings updates`)
+		}
+	}
+	u.ResetRemaining()
+	return errors.Wrap(storeCachedSettingsKVs(ctx, eng, settingsKVs), "while storing settings kvs")
+}
 
+// RefreshSettings starts a settings-changes listener.
+func (s *Server) refreshSettings(initialSettingsKVs []roachpb.KeyValue) error {
 	ctx := s.AnnotateCtx(context.Background())
+	// If we have initial settings KV pairs loaded from the local engines,
+	// apply them before starting the gossip listener.
+	if len(initialSettingsKVs) != 0 {
+		if err := processSystemConfigKVs(ctx, initialSettingsKVs, s.st.MakeUpdater(), s.engines[0]); err != nil {
+			return errors.Wrap(err, "during processing initial settings")
+		}
+	}
+	// Setup updater that listens for changes in settings.
 	s.stopper.RunWorker(ctx, func(ctx context.Context) {
 		gossipUpdateC := s.gossip.RegisterSystemConfigChannel()
 		// No new settings can be defined beyond this point.
@@ -113,22 +138,13 @@ func (s *Server) refreshSettings() {
 			case <-gossipUpdateC:
 				cfg := s.gossip.GetSystemConfig()
 				u := s.st.MakeUpdater()
-				ok := true
-				for _, kv := range cfg.Values {
-					if err := processKV(ctx, kv, u); err != nil {
-						log.Warningf(ctx, `error decoding settings data: %+v
-								this likely indicates the settings table structure or encoding has been altered;
-								skipping settings updates`, err)
-						ok = false
-						break
-					}
-				}
-				if ok {
-					u.ResetRemaining()
+				if err := processSystemConfigKVs(ctx, cfg.Values, u, s.engines[0]); err != nil {
+					log.Warningf(ctx, "error processing config KVs: %+v", err)
 				}
 			case <-s.stopper.ShouldStop():
 				return
 			}
 		}
 	})
+	return nil
 }

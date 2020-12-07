@@ -291,6 +291,9 @@ func (b *Builder) buildStmt(
 	case *tree.Explain:
 		return b.buildExplain(stmt, inScope)
 
+	case *tree.ExplainAnalyze:
+		return b.buildExplainAnalyze(stmt, inScope)
+
 	case *tree.ShowTraceForSession:
 		return b.buildShowTrace(stmt, inScope)
 
@@ -317,10 +320,6 @@ func (b *Builder) buildStmt(
 
 	case *tree.Export:
 		return b.buildExport(stmt, inScope)
-
-	case *tree.ExplainAnalyzeDebug:
-		// This statement should have been handled by the executor.
-		panic(errors.Errorf("%s can only be used as a top-level statement", stmt.StatementTag()))
 
 	default:
 		// See if this statement can be rewritten to another statement using the
@@ -387,7 +386,7 @@ func (b *Builder) maybeTrackRegclassDependenciesForViews(texpr tree.TypedExpr) {
 					panic(err)
 				}
 				tn := tree.MakeUnqualifiedTableName(tree.Name(regclass.String()))
-				ds, _ := b.resolveDataSource(&tn, privilege.SELECT)
+				ds, _, _ := b.resolveDataSource(&tn, privilege.SELECT)
 
 				b.viewDeps = append(b.viewDeps, opt.ViewDep{
 					DataSource: ds,

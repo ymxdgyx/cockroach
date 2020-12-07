@@ -37,8 +37,8 @@ import (
 	clog "github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
-	crdberrors "github.com/cockroachdb/errors"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -462,12 +462,12 @@ func (c *SyncedCluster) Run(stdout, stderr io.Writer, nodes []int, title, cmd st
 		display = fmt.Sprintf("%s: %s", c.Name, title)
 	}
 
-	errors := make([]error, len(nodes))
+	errs := make([]error, len(nodes))
 	results := make([]string, len(nodes))
 	c.Parallel(display, len(nodes), 0, func(i int) ([]byte, error) {
 		sess, err := c.newSession(nodes[i])
 		if err != nil {
-			errors[i] = err
+			errs[i] = err
 			results[i] = err.Error()
 			return nil, nil
 		}
@@ -499,12 +499,12 @@ func (c *SyncedCluster) Run(stdout, stderr io.Writer, nodes []int, title, cmd st
 		if stream {
 			sess.SetStdout(stdout)
 			sess.SetStderr(stderr)
-			errors[i] = sess.Run(nodeCmd)
-			if errors[i] != nil {
+			errs[i] = sess.Run(nodeCmd)
+			if errs[i] != nil {
 				detailMsg := fmt.Sprintf("Node %d. Command with error:\n```\n%s\n```\n", nodes[i], cmd)
-				err = crdberrors.WithDetail(errors[i], detailMsg)
+				err = errors.WithDetail(errs[i], detailMsg)
 				err = rperrors.ClassifyCmdError(err)
-				errors[i] = err
+				errs[i] = err
 			}
 			return nil, nil
 		}
@@ -513,9 +513,9 @@ func (c *SyncedCluster) Run(stdout, stderr io.Writer, nodes []int, title, cmd st
 		msg := strings.TrimSpace(string(out))
 		if err != nil {
 			detailMsg := fmt.Sprintf("Node %d. Command with error:\n```\n%s\n```\n", nodes[i], cmd)
-			err = crdberrors.WithDetail(err, detailMsg)
+			err = errors.WithDetail(err, detailMsg)
 			err = rperrors.ClassifyCmdError(err)
-			errors[i] = err
+			errs[i] = err
 			msg += fmt.Sprintf("\n%v", err)
 		}
 		results[i] = msg
@@ -528,7 +528,7 @@ func (c *SyncedCluster) Run(stdout, stderr io.Writer, nodes []int, title, cmd st
 		}
 	}
 
-	return rperrors.SelectPriorityError(errors)
+	return rperrors.SelectPriorityError(errs)
 }
 
 // Wait TODO(peter): document
@@ -625,7 +625,7 @@ tar cf - .ssh/id_rsa .ssh/id_rsa.pub .ssh/authorized_keys
 		return nil, nil
 	})
 
-	// Skip the the first node which is where we generated the key.
+	// Skip the first node which is where we generated the key.
 	nodes := c.Nodes[1:]
 	c.Parallel("distributing ssh key", len(nodes), 0, func(i int) ([]byte, error) {
 		sess, err := c.newSession(nodes[i])
@@ -915,7 +915,7 @@ tar cvf certs.tar certs
 		os.Exit(1)
 	}
 
-	// Skip the the first node which is where we generated the certs.
+	// Skip the first node which is where we generated the certs.
 	display = c.Name + ": distributing certs"
 	nodes = nodes[1:]
 	c.Parallel(display, len(nodes), 0, func(i int) ([]byte, error) {
@@ -1735,4 +1735,44 @@ func (c *SyncedCluster) Parallel(
 
 func (c *SyncedCluster) escapedTag() string {
 	return strings.Replace(c.Tag, "/", "\\/", -1)
+}
+
+// Init initializes the cluster. It does it through node 1 (as per ServerNodes)
+// to maintain parity with auto-init behavior of `roachprod start` (when
+// --skip-init) is not specified. The implementation should be kept in
+// sync with Cockroach.Start.
+func (c *SyncedCluster) Init() {
+	r := c.Impl.(Cockroach)
+	h := &crdbInstallHelper{c: c, r: r}
+
+	// See (Cockroach).Start. We reserve a few special operations for the first
+	// node, so we strive to maintain the same here for interoperability.
+	const firstNodeIdx = 0
+
+	vers, err := getCockroachVersion(c, c.ServerNodes()[firstNodeIdx])
+	if err != nil {
+		log.Fatalf("unable to retrieve cockroach version: %v", err)
+	}
+
+	if !vers.AtLeast(version.MustParse("v20.1.0")) {
+		log.Fatal("`roachprod init` only supported for v20.1 and beyond")
+	}
+
+	fmt.Printf("%s: initializing cluster\n", h.c.Name)
+	initOut, err := h.initializeCluster(firstNodeIdx)
+	if err != nil {
+		log.Fatalf("unable to initialize cluster: %v", err)
+	}
+	if initOut != "" {
+		fmt.Println(initOut)
+	}
+
+	fmt.Printf("%s: setting cluster settings\n", h.c.Name)
+	clusterSettingsOut, err := h.setClusterSettings(firstNodeIdx)
+	if err != nil {
+		log.Fatalf("unable to set cluster settings: %v", err)
+	}
+	if clusterSettingsOut != "" {
+		fmt.Println(clusterSettingsOut)
+	}
 }

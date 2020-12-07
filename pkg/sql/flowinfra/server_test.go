@@ -24,7 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -58,7 +58,6 @@ func TestServer(t *testing.T) {
 		Spans:    []execinfrapb.TableReaderSpan{{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)}},
 	}
 	post := execinfrapb.PostProcessSpec{
-		Filter:        execinfrapb.Expression{Expr: "@1 != 2"}, // a != 2
 		Projection:    true,
 		OutputColumns: []uint32{0, 1}, // a
 	}
@@ -91,7 +90,7 @@ func TestServer(t *testing.T) {
 	}
 
 	var decoder StreamDecoder
-	var rows sqlbase.EncDatumRows
+	var rows rowenc.EncDatumRows
 	var metas []execinfrapb.ProducerMetadata
 	for {
 		msg, err := stream.Recv()
@@ -112,8 +111,8 @@ func TestServer(t *testing.T) {
 	if len(metas) != 0 {
 		t.Errorf("unexpected metadata: %v", metas)
 	}
-	str := rows.String(sqlbase.TwoIntCols)
-	expected := "[[1 10] [3 30]]"
+	str := rows.String(rowenc.TwoIntCols)
+	expected := "[[1 10] [2 20] [3 30]]"
 	if str != expected {
 		t.Errorf("invalid results: %s, expected %s'", str, expected)
 	}

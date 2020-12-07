@@ -13,7 +13,6 @@ package colexec
 import (
 	"container/heap"
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
@@ -21,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 const (
@@ -36,7 +36,7 @@ func NewTopKSorter(
 	input colexecbase.Operator,
 	inputTypes []*types.T,
 	orderingCols []execinfrapb.Ordering_Column,
-	k int,
+	k uint64,
 ) colexecbase.Operator {
 	return &topKSorter{
 		allocator:    allocator,
@@ -70,7 +70,7 @@ type topKSorter struct {
 	allocator    *colmem.Allocator
 	orderingCols []execinfrapb.Ordering_Column
 	inputTypes   []*types.T
-	k            int
+	k            uint64
 
 	// state is the current state of the sort.
 	state topKSortState
@@ -98,7 +98,7 @@ type topKSorter struct {
 
 func (t *topKSorter) Init() {
 	t.input.Init()
-	t.topK = newAppendOnlyBufferedBatch(t.allocator, t.inputTypes)
+	t.topK = newAppendOnlyBufferedBatch(t.allocator, t.inputTypes, nil /* colsToStore */)
 	t.comparators = make([]vecComparator, len(t.inputTypes))
 	for i, typ := range t.inputTypes {
 		t.comparators[i] = GetVecComparator(typ, 2)
@@ -125,7 +125,7 @@ func (t *topKSorter) Next(ctx context.Context) coldata.Batch {
 		case topKSortDone:
 			return coldata.ZeroBatch
 		default:
-			colexecerror.InternalError(fmt.Sprintf("invalid sort state %v", t.state))
+			colexecerror.InternalError(errors.AssertionFailedf("invalid sort state %v", t.state))
 			// This code is unreachable, but the compiler cannot infer that.
 			return nil
 		}
@@ -146,15 +146,15 @@ func (t *topKSorter) spool(ctx context.Context) {
 	remainingRows := t.k
 	for remainingRows > 0 && t.inputBatch.Length() > 0 {
 		fromLength := t.inputBatch.Length()
-		if remainingRows < t.inputBatch.Length() {
+		if remainingRows < uint64(t.inputBatch.Length()) {
 			// t.topK will be full after this batch.
-			fromLength = remainingRows
+			fromLength = int(remainingRows)
 		}
 		t.firstUnprocessedTupleIdx = fromLength
 		t.allocator.PerformOperation(t.topK.ColVecs(), func() {
 			t.topK.append(t.inputBatch, 0 /* startIdx */, fromLength)
 		})
-		remainingRows -= fromLength
+		remainingRows -= uint64(fromLength)
 		if fromLength == t.inputBatch.Length() {
 			t.inputBatch = t.input.Next(ctx)
 			t.firstUnprocessedTupleIdx = 0
@@ -251,7 +251,7 @@ func (t *topKSorter) compareRow(vecIdx1, vecIdx2 int, rowIdx1, rowIdx2 int) int 
 			case execinfrapb.Ordering_Column_DESC:
 				return -res
 			default:
-				colexecerror.InternalError(fmt.Sprintf("unexpected direction value %d", d))
+				colexecerror.InternalError(errors.AssertionFailedf("unexpected direction value %d", d))
 			}
 		}
 	}
